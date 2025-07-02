@@ -3,9 +3,14 @@ import { useParams } from 'react-router-dom';
 import io from 'socket.io-client';
 import * as mediasoupClient from 'mediasoup-client';
 
-const socket = io('https://192.168.178.163:3000', {
-  secure: true,
-  rejectUnauthorized: false // Accept self-signed SSL
+const socket = io('/', {
+  path: '/socket.io',
+  transports: ['websocket']
+});
+
+socket.on('connect_error', (err) => {
+  console.error('❌ WebSocket connection failed:', err.message);
+  alert('Could not connect to server. Please check your network or try again later.');
 });
 
 const Room = () => {
