@@ -19,10 +19,15 @@ const Room = () => {
   const [isOwner, setIsOwner] = useState(false);
   const [approved, setApproved] = useState(false);
 
-  // Track remote streams by producerId
-  const [remoteStreams, setRemoteStreams] = useState([]); // [{producerId, stream}]
+  // Manage remote streams: array of {producerId, stream}
+  const [remoteStreams, setRemoteStreams] = useState([]);
+  const remoteStreamsRef = useRef([]);
+  remoteStreamsRef.current = remoteStreams;
 
-  // Mediasoup state
+  // Queue for producerIds
+  const pendingProducersRef = useRef([]); // [{producerId, socketId}]
+
+  // Mediasoup stuff
   const deviceRef = useRef(null);
   const sendTransportRef = useRef(null);
   const recvTransportRef = useRef(null);
@@ -46,31 +51,18 @@ const Room = () => {
 
     socket.on('join-denied', () => {
       alert("You were denied access to the room.");
+      window.location.href = '/';
     });
 
     socket.on('room-closed', () => {
       alert("Room was closed by the owner.");
-      window.location.reload();
+      window.location.href = '/';
     });
 
     // Listen for new producers (remote users' media)
-    socket.on('newProducer', async ({ producerId }) => {
-      if (!recvTransportRef.current || !deviceRef.current) return;
-      // Fetch RTP capabilities
-      const { rtpCapabilities } = deviceRef.current;
-      // Ask backend to consume
-      socket.emit('consume', { producerId, rtpCapabilities }, async (params) => {
-        if (params && params.id) {
-          const consumer = await recvTransportRef.current.consume({
-            id: params.id,
-            producerId: params.producerId,
-            kind: params.kind,
-            rtpParameters: params.rtpParameters
-          });
-          const stream = new MediaStream([consumer.track]);
-          setRemoteStreams((prev) => [...prev, { producerId, stream }]);
-        }
-      });
+    socket.on('newProducer', ({ producerId, socketId }) => {
+      pendingProducersRef.current.push({ producerId, socketId });
+      tryConsumeProducers();
     });
 
     return () => {
@@ -152,11 +144,39 @@ const Room = () => {
           });
 
           recvTransportRef.current = recvTransport;
+
+          // NOW call this:
+          tryConsumeProducers();
         });
       });
     } catch (err) {
       alert('Could not access camera/microphone. Make sure permissions are granted.');
     }
+  };
+
+  // Consumes all queued remote producers
+  const tryConsumeProducers = () => {
+    if (!recvTransportRef.current || !deviceRef.current) return;
+    const producersToConsume = pendingProducersRef.current.splice(0, pendingProducersRef.current.length);
+    producersToConsume.forEach(({ producerId }) => {
+      const { rtpCapabilities } = deviceRef.current;
+      socket.emit('consume', { producerId, rtpCapabilities }, async (params) => {
+        if (params && params.id) {
+          const consumer = await recvTransportRef.current.consume({
+            id: params.id,
+            producerId: params.producerId,
+            kind: params.kind,
+            rtpParameters: params.rtpParameters
+          });
+          const stream = new MediaStream([consumer.track]);
+          setRemoteStreams(prev => {
+            // Avoid duplicates
+            if (prev.find(r => r.producerId === producerId)) return prev;
+            return [...prev, { producerId, stream }];
+          });
+        }
+      });
+    });
   };
 
   return (
