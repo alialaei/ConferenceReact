@@ -1,0 +1,31 @@
+# Node dependencies
+/node_modules/
+.history
+.pnp/
+.pnp.js
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Dependency lock (optional — keep only if team uses lock file consistently)
+package-lock.json
+
+# Test coverage
+/coverage/
+
+# Build output
+/dist/
+/build/
+
+# OS
+.DS_Store
+
+# Env files
+.env
+.env.*.local
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
