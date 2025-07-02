@@ -3,14 +3,6 @@ import { useParams } from 'react-router-dom';
 import io from 'socket.io-client';
 import * as mediasoupClient from 'mediasoup-client';
 
-const io = new Server(server, {
-  cors: {
-    origin: ['https://conference.mmup.org'], // add frontend domain here
-    methods: ["GET", "POST"],
-    credentials: true
-  }
-});
-
 const socket = io('https://webrtcserver.mmup.org', {
   path: '/socket.io',
   transports: ['websocket']
