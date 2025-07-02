@@ -5,5 +5,7 @@ export default defineConfig({
   plugins: [react()],
   server: {
     port: 3001,
+    host: true, // enable external access
+    allowedHosts: ['conference.mmup.org'], // explicitly allow your domain
   },
 });
