@@ -18,19 +18,15 @@ const Room = () => {
   const localVideoRef = useRef();
   const [isOwner, setIsOwner] = useState(false);
   const [approved, setApproved] = useState(false);
-
-  // Manage remote streams: array of {producerId, stream}
   const [remoteStreams, setRemoteStreams] = useState([]);
-  const remoteStreamsRef = useRef([]);
-  remoteStreamsRef.current = remoteStreams;
 
-  // Queue for producerIds
-  const pendingProducersRef = useRef([]); // [{producerId, socketId}]
-
-  // Mediasoup stuff
+  // Mediasoup refs
   const deviceRef = useRef(null);
   const sendTransportRef = useRef(null);
   const recvTransportRef = useRef(null);
+
+  // Pending producerIds to consume
+  const pendingProducersRef = useRef([]);
 
   useEffect(() => {
     // Owner receives join requests and can approve
@@ -44,9 +40,10 @@ const Room = () => {
       }
     });
 
-    socket.on('join-approved', () => {
+    // Listen for join-approved, which now provides existingProducers
+    socket.on('join-approved', ({ existingProducers = [] } = {}) => {
       setApproved(true);
-      initMedia();
+      initMedia(existingProducers);
     });
 
     socket.on('join-denied', () => {
@@ -59,7 +56,6 @@ const Room = () => {
       window.location.href = '/';
     });
 
-    // Listen for new producers (remote users' media)
     socket.on('newProducer', ({ producerId, socketId }) => {
       pendingProducersRef.current.push({ producerId, socketId });
       tryConsumeProducers();
@@ -80,28 +76,17 @@ const Room = () => {
   }, []);
 
   const joinRoom = async () => {
-    // Owner marker per room
-    const ownerMarkerKey = `room-owner-${roomId}`;
-    let isOwnerCandidate = false;
-    if (!sessionStorage.getItem(ownerMarkerKey)) {
-      isOwnerCandidate = true;
-      sessionStorage.setItem(ownerMarkerKey, "1");
-    }
-
-    const response = await new Promise(resolve =>
-      socket.emit('join-room', { roomId, isOwnerCandidate }, resolve)
-    );
-
-    setIsOwner(response.isOwner);
-
-    if (response.isOwner || response.waitForApproval === false) {
-      setApproved(true);
-      initMedia();
-    }
+    socket.emit('join-room', { roomId }, (response = {}) => {
+      setIsOwner(response.isOwner);
+      if (response.isOwner) {
+        setApproved(true);
+        initMedia([]); // No existing producers when you are owner
+      }
+      // Guests will be approved and initMedia via join-approved event
+    });
   };
 
-  // ---- Media + Mediasoup setup ----
-  const initMedia = async () => {
+  const initMedia = async (existingProducers = []) => {
     try {
       // Get local camera/mic
       const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
@@ -145,8 +130,13 @@ const Room = () => {
 
           recvTransportRef.current = recvTransport;
 
-          // NOW call this:
-          tryConsumeProducers();
+          // Queue up all existing producers, then try to consume them
+          if (Array.isArray(existingProducers)) {
+            for (const { producerId, socketId } of existingProducers) {
+              pendingProducersRef.current.push({ producerId, socketId });
+            }
+            tryConsumeProducers();
+          }
         });
       });
     } catch (err) {
