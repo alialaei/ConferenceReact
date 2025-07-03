@@ -1,280 +1,123 @@
-import React, { useEffect, useRef, useState } from 'react';
+// Room.jsx
+import { useEffect, useState, useRef } from 'react';
 import { useParams } from 'react-router-dom';
 import io from 'socket.io-client';
 import * as mediasoupClient from 'mediasoup-client';
 
-const socket = io('https://webrtcserver.mmup.org', {
-  path: '/socket.io',
-  transports: ['websocket'],
-  autoConnect: true
-});
+const socket = io('https://webrtcserver.mmup.org', { transports: ['websocket'] });
 
-const Room = () => {
+export default function Room() {
   const { roomId } = useParams();
-  const localVideoRef = useRef();
-  const [isOwner, setIsOwner] = useState(false);
-  const [approved, setApproved] = useState(false);
+  const localRef   = useRef(null);
 
-  // socketId -> { stream, videoTrack, audioTrack }
-  const [remoteParticipants, setRemoteParticipants] = useState({});
-  const consumedProducers = useRef(new Set());
-  const deviceRef = useRef(null);
-  const sendTransportRef = useRef(null);
-  const recvTransportRef = useRef(null);
+  const [isOwner,   setIsOwner]   = useState(false);
+  const [approved,  setApproved]  = useState(false);
+  const [people,    setPeople]    = useState({});        // socketId -> {stream}
+  const consumers   = useRef(new Set());
 
+  const device      = useRef(null);
+  const sendT       = useRef(null);
+  const recvT       = useRef(null);
+
+  /* ---------- one-time join ------------------------------------------- */
   useEffect(() => {
-    console.log("Setting up socket listeners");
-
-    socket.on('join-request', ({ socketId }) => {
-      console.log('[join-request]', socketId);
-      if (isOwner) {
-        if (window.confirm(`Approve user ${socketId}?`)) {
-          socket.emit('approve-join', { targetSocketId: socketId });
-        } else {
-          socket.emit('deny-join', { targetSocketId: socketId });
-        }
-      }
+    socket.emit('join-room', { roomId }, ({ isOwner }) => {
+      setIsOwner(isOwner);
+      if (isOwner) setApproved(true);     // owner auto-approved
     });
+  }, [roomId]);
 
-    socket.on('newProducer', ({ producerId, socketId }) => {
-      console.log('[newProducer]', producerId, socketId);
-      if (!consumedProducers.current.has(producerId)) {
-        consumedProducers.current.add(producerId);
-        consumeProducer(producerId, socketId);
-      }
-    });
+  /* ---------- socket listeners ---------------------------------------- */
+  useEffect(() => {
+    const onJoinReq  = ({ socketId }) => isOwner &&
+      window.confirm(`Accept ${socketId}?`)
+        ? socket.emit('approve-join', { targetSocketId: socketId })
+        : socket.emit('deny-join',    { targetSocketId: socketId });
 
-    socket.on('join-approved', (data = {}) => {
-      console.log('[join-approved]', data);
+    const onJoinOk   = ({ existingProducers }) => {
       setApproved(true);
-      initMedia().then(() => {
-        if (data.existingProducers && data.existingProducers.length) {
-          data.existingProducers.forEach(({ producerId, socketId }) => {
-            if (!consumedProducers.current.has(producerId)) {
-              consumedProducers.current.add(producerId);
-              consumeProducer(producerId, socketId);
-            }
-          });
-        }
-      });
-    });
-
-    socket.on('join-denied', () => {
-      alert('You were denied access to the room.');
-      window.location.href = '/';
-    });
-
-    socket.on('room-closed', () => {
-      alert('Room was closed by the owner.');
-      window.location.href = '/';
-    });
-
-    return () => {
-      socket.off('join-request');
-      socket.off('join-approved');
-      socket.off('join-denied');
-      socket.off('room-closed');
-      socket.off('newProducer');
+      initMedia().then(() => existingProducers.forEach(p => handleProducer(p)));
     };
+
+    const onNewProd  = handleProducer;
+    const onDenied   = () => alert('Join denied') || window.location.replace('/');
+    const onClosed   = () => alert('Room closed') || window.location.replace('/');
+
+    socket
+      .on('join-request',  onJoinReq)
+      .on('join-approved', onJoinOk)
+      .on('newProducer',   onNewProd)
+      .on('join-denied',   onDenied)
+      .on('room-closed',   onClosed);
+
+    return () => socket.off('join-request',  onJoinReq)
+                       .off('join-approved', onJoinOk)
+                       .off('newProducer',   onNewProd)
+                       .off('join-denied',   onDenied)
+                       .off('room-closed',   onClosed);
   }, [isOwner]);
 
-  useEffect(() => {
-    joinRoom();
-    // eslint-disable-next-line
-  }, []);
+  /* ---------- mediasoup bootstrap ------------------------------------ */
+  async function initMedia() {
+    /* get cam/mic ------------------------------------------------------ */
+    const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+    localRef.current.srcObject = stream;
 
-  const joinRoom = () => {
-    const ownerMarkerKey = `room-owner-${roomId}`;
-    if (!sessionStorage.getItem(ownerMarkerKey)) {
-      sessionStorage.setItem(ownerMarkerKey, "1");
-    }
-    console.log('Joining room', roomId);
-    socket.emit('join-room', { roomId }, (response = {}) => {
-      console.log('[join-room cb]', response);
-      setIsOwner(response.isOwner);
-      if (response.isOwner || response.waitForApproval === false) {
-        setApproved(true);
-        initMedia().then(() => {
-          if (response.existingProducers && response.existingProducers.length) {
-            response.existingProducers.forEach(({ producerId, socketId }) => {
-              if (!consumedProducers.current.has(producerId)) {
-                consumedProducers.current.add(producerId);
-                consumeProducer(producerId, socketId);
-              }
-            });
-          }
-        });
-      }
-    });
-  };
+    /* router caps ------------------------------------------------------ */
+    const rtpCaps = await new Promise(res =>
+      socket.emit('getRouterRtpCapabilities', res));
 
-  // ---- Mediasoup setup ----
-  const initMedia = async () => {
-    try {
-      // 1. Get camera/mic
-      const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
-      localVideoRef.current.srcObject = stream;
-      console.log('Got local stream', stream);
+    device.current = new mediasoupClient.Device();
+    await device.current.load({ routerRtpCapabilities: rtpCaps });
 
-      // 2. Create device
-      await new Promise(resolve => {
-        socket.emit('getRouterRtpCapabilities', async (rtpCapabilities) => {
-          console.log('Got routerRtpCapabilities', rtpCapabilities);
-          const device = new mediasoupClient.Device();
-          await device.load({ routerRtpCapabilities: rtpCapabilities });
-          deviceRef.current = device;
-          resolve();
-        });
-      });
+    /* send transport --------------------------------------------------- */
+    const paramsSend = await new Promise(res => socket.emit('createTransport', res));
+    sendT.current    = device.current.createSendTransport(paramsSend);
 
-      // 3. Create send transport (publishing)
-      await new Promise(resolve => {
-        socket.emit('createTransport', async (params) => {
-          console.log('Creating sendTransport', params);
-          const sendTransport = deviceRef.current.createSendTransport({
-            ...params,
-            iceServers: params.iceServers // ← from backend!
-          });
+    sendT.current.on('connect', (d, cb) =>
+      socket.emit('connectTransport', { transportId: sendT.current.id, dtlsParameters: d }, cb));
 
-          sendTransport.on('connect', ({ dtlsParameters }, callback) => {
-            socket.emit('connectTransport', { transportId: sendTransport.id, dtlsParameters }, callback);
-          });
+    sendT.current.on('produce', (p, cb) =>
+      socket.emit('produce', { transportId: sendT.current.id, ...p }, ({ id }) => cb({ id })));
 
-          sendTransport.on('produce', ({ kind, rtpParameters }, callback) => {
-            socket.emit('produce', { transportId: sendTransport.id, kind, rtpParameters }, ({ id }) => {
-              callback({ id });
-            });
-          });
+    await Promise.all(stream.getTracks().map(t => sendT.current.produce({ track: t })));
 
-          sendTransportRef.current = sendTransport;
+    /* recv transport --------------------------------------------------- */
+    const paramsRecv = await new Promise(res => socket.emit('createTransport', res));
+    recvT.current    = device.current.createRecvTransport(paramsRecv);
 
-          // Publish camera + mic
-          for (const track of stream.getTracks()) {
-            await sendTransport.produce({ track });
-            console.log('Produced track', track);
-          }
-          resolve();
+    recvT.current.on('connect', (d, cb) =>
+      socket.emit('connectTransport', { transportId: recvT.current.id, dtlsParameters: d }, cb));
+  }
+
+  /* ---------- consume helper ----------------------------------------- */
+  function handleProducer({ producerId, socketId }) {
+    if (consumers.current.has(producerId) || !recvT.current) return;
+    consumers.current.add(producerId);
+
+    socket.emit('consume', { producerId, rtpCapabilities: device.current.rtpCapabilities },
+      async ({ id, kind, rtpParameters }) => {
+        const consumer = await recvT.current.consume({ id, producerId, kind, rtpParameters });
+        setPeople(p => {
+          const stream = p[socketId]?.stream ?? new MediaStream();
+          stream.addTrack(consumer.track);
+          return { ...p, [socketId]: { stream } };
         });
       });
+  }
 
-      // 4. Create recv transport (for consuming)
-      await new Promise(resolve => {
-        socket.emit('createTransport', async (params) => {
-          console.log('Creating recvTransport', params);
-          const recvTransport = deviceRef.current.createRecvTransport({
-            ...params,
-            iceServers: params.iceServers // ← from backend!
-          });
-
-          recvTransport.on('connect', ({ dtlsParameters }, callback) => {
-            socket.emit('connectTransport', { transportId: recvTransport.id, dtlsParameters }, callback);
-          });
-
-          recvTransportRef.current = recvTransport;
-          resolve();
-        });
-      });
-      console.log('initMedia done');
-    } catch (err) {
-      alert('Could not access camera/microphone. Make sure permissions are granted.');
-      console.error('initMedia error', err);
-    }
-  };
-
-  // ---- Consume remote producer (group tracks by socketId) ----
-  const consumeProducer = (producerId, socketId) => {
-    if (!recvTransportRef.current || !deviceRef.current) {
-      console.log('[consumeProducer] recvTransport or device missing');
-      return;
-    }
-    const { rtpCapabilities } = deviceRef.current;
-    console.log('[consumeProducer] for', producerId, 'from', socketId, rtpCapabilities);
-    socket.emit('consume', { producerId, rtpCapabilities }, async (params) => {
-      console.log('[consume cb]', params);
-      if (params && params.id) {
-        const consumer = await recvTransportRef.current.consume({
-          id: params.id,
-          producerId: params.producerId,
-          kind: params.kind,
-          rtpParameters: params.rtpParameters
-        });
-
-        setRemoteParticipants(prev => {
-          // Create or clone participant object for socketId
-          let part = prev[socketId] || { stream: new MediaStream(), videoTrack: null, audioTrack: null };
-          // Only add track if not already present
-          if (params.kind === 'video' && !part.stream.getVideoTracks().some(t => t.id === consumer.track.id)) {
-            part.videoTrack = consumer.track;
-            part.stream.addTrack(consumer.track);
-            console.log('Added video track to', socketId);
-          }
-          if (params.kind === 'audio' && !part.stream.getAudioTracks().some(t => t.id === consumer.track.id)) {
-            part.audioTrack = consumer.track;
-            part.stream.addTrack(consumer.track);
-            console.log('Added audio track to', socketId);
-          }
-          return { ...prev, [socketId]: part };
-        });
-      }
-    });
-  };
-
-  useEffect(() => {
-    // Debug log on every remote participant change
-    console.log("RemoteParticipants changed:", remoteParticipants);
-  }, [remoteParticipants]);
-
+  /* ---------- render -------------------------------------------------- */
   return (
-    <div style={{ padding: '2rem' }}>
-      <h1>🔗 Room: {roomId}</h1>
-      {isOwner && <p>You are the owner. Waiting for guests...</p>}
-      {!isOwner && !approved && <p>Waiting for owner's approval...</p>}
-      <div style={{ display: 'flex', gap: '2rem', marginTop: '2rem' }}>
-        <div>
-          <h3>Your Camera</h3>
-          <video ref={localVideoRef} autoPlay playsInline muted width={300} />
-        </div>
-        <div>
-          <h3>Remote Participants</h3>
-          {Object.entries(remoteParticipants).map(([socketId, { stream, videoTrack, audioTrack }]) => (
-            <div key={socketId}>
-              {videoTrack && (
-                <video
-                  key={videoTrack.id}
-                  autoPlay
-                  playsInline
-                  width={300}
-                  ref={el => {
-                    if (el && stream) {
-                      el.srcObject = stream;
-                      el.muted = false;
-                      el.onloadedmetadata = () => { el.play().catch(() => {}); };
-                    }
-                  }}
-                  style={{ background: "#000", marginBottom: 8 }}
-                />
-              )}
-              {audioTrack && (
-                <audio
-                  key={audioTrack.id}
-                  autoPlay
-                  controls
-                  ref={el => {
-                    if (el && stream) {
-                      el.srcObject = stream;
-                      el.muted = false;
-                      el.onloadedmetadata = () => { el.play().catch(() => {}); };
-                    }
-                  }}
-                  style={{ display: 'block', marginTop: 4 }}
-                />
-              )}
-            </div>
-          ))}
-        </div>
-      </div>
+    <div style={{ padding: 32 }}>
+      <h2>Room {roomId}</h2>
+      {isOwner   && !approved && <p>Waiting for guests…</p>}
+      {!isOwner  && !approved && <p>Waiting for owner approval…</p>}
+
+      <video ref={localRef}  autoPlay playsInline muted width={320} style={{ background:'#000' }} />
+
+      {Object.entries(people).map(([id, { stream }]) =>
+        <video key={id} autoPlay playsInline width={320}
+               ref={el => el && (el.srcObject = stream)} />)}
     </div>
   );
-};
-
-export default Room;
+}
