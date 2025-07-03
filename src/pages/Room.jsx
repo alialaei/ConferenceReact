@@ -16,7 +16,7 @@ const Room = () => {
   const [isOwner, setIsOwner] = useState(false);
   const [approved, setApproved] = useState(false);
 
-  // Map: socketId -> { stream: MediaStream, videoTrack: MediaStreamTrack, audioTrack: MediaStreamTrack }
+  // socketId -> { stream, tracks }
   const [remoteParticipants, setRemoteParticipants] = useState({});
   const remoteParticipantsRef = useRef({});
   remoteParticipantsRef.current = remoteParticipants;
@@ -27,7 +27,10 @@ const Room = () => {
   const recvTransportRef = useRef(null);
 
   useEffect(() => {
+    console.log("Setting up socket listeners");
+
     socket.on('join-request', ({ socketId }) => {
+      console.log('[join-request]', socketId);
       if (isOwner) {
         if (window.confirm(`Approve user ${socketId}?`)) {
           socket.emit('approve-join', { targetSocketId: socketId });
@@ -38,7 +41,7 @@ const Room = () => {
     });
 
     socket.on('newProducer', ({ producerId, socketId }) => {
-      // Only consume if not already consumed
+      console.log('[newProducer]', producerId, socketId);
       if (!consumedProducers.current.has(producerId)) {
         consumedProducers.current.add(producerId);
         consumeProducer(producerId, socketId);
@@ -46,9 +49,9 @@ const Room = () => {
     });
 
     socket.on('join-approved', (data = {}) => {
+      console.log('[join-approved]', data);
       setApproved(true);
       initMedia().then(() => {
-        // Consume all existing remote producers
         if (data.existingProducers && data.existingProducers.length) {
           data.existingProducers.forEach(({ producerId, socketId }) => {
             if (!consumedProducers.current.has(producerId)) {
@@ -91,7 +94,9 @@ const Room = () => {
       isOwnerCandidate = true;
       sessionStorage.setItem(ownerMarkerKey, "1");
     }
+    console.log('Joining room', roomId);
     socket.emit('join-room', { roomId }, (response = {}) => {
+      console.log('[join-room cb]', response);
       setIsOwner(response.isOwner);
       if (response.isOwner || response.waitForApproval === false) {
         setApproved(true);
@@ -115,10 +120,12 @@ const Room = () => {
       // 1. Get camera/mic
       const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
       localVideoRef.current.srcObject = stream;
+      console.log('Got local stream', stream);
 
       // 2. Create device
       await new Promise(resolve => {
         socket.emit('getRouterRtpCapabilities', async (rtpCapabilities) => {
+          console.log('Got routerRtpCapabilities', rtpCapabilities);
           const device = new mediasoupClient.Device();
           await device.load({ routerRtpCapabilities: rtpCapabilities });
           deviceRef.current = device;
@@ -129,6 +136,7 @@ const Room = () => {
       // 3. Create send transport (publishing)
       await new Promise(resolve => {
         socket.emit('createTransport', async (params) => {
+          console.log('Creating sendTransport', params);
           const sendTransport = deviceRef.current.createSendTransport(params);
 
           sendTransport.on('connect', ({ dtlsParameters }, callback) => {
@@ -146,6 +154,7 @@ const Room = () => {
           // Publish camera + mic
           for (const track of stream.getTracks()) {
             await sendTransport.produce({ track });
+            console.log('Produced track', track);
           }
           resolve();
         });
@@ -154,6 +163,7 @@ const Room = () => {
       // 4. Create recv transport (for consuming)
       await new Promise(resolve => {
         socket.emit('createTransport', async (params) => {
+          console.log('Creating recvTransport', params);
           const recvTransport = deviceRef.current.createRecvTransport(params);
 
           recvTransport.on('connect', ({ dtlsParameters }, callback) => {
@@ -164,16 +174,23 @@ const Room = () => {
           resolve();
         });
       });
+      console.log('initMedia done');
     } catch (err) {
       alert('Could not access camera/microphone. Make sure permissions are granted.');
+      console.error('initMedia error', err);
     }
   };
 
   // ---- Consume remote producer (group tracks by socketId) ----
   const consumeProducer = (producerId, socketId) => {
-    if (!recvTransportRef.current || !deviceRef.current) return;
+    if (!recvTransportRef.current || !deviceRef.current) {
+      console.log('[consumeProducer] recvTransport or device missing');
+      return;
+    }
     const { rtpCapabilities } = deviceRef.current;
+    console.log('[consumeProducer] for', producerId, 'from', socketId, rtpCapabilities);
     socket.emit('consume', { producerId, rtpCapabilities }, async (params) => {
+      console.log('[consume cb]', params);
       if (params && params.id) {
         const consumer = await recvTransportRef.current.consume({
           id: params.id,
@@ -187,9 +204,11 @@ const Room = () => {
           if (params.kind === 'video') {
             part.videoTrack = consumer.track;
             part.stream.addTrack(consumer.track);
+            console.log('Added video track to', socketId);
           } else if (params.kind === 'audio') {
             part.audioTrack = consumer.track;
             part.stream.addTrack(consumer.track);
+            console.log('Added audio track to', socketId);
           }
           return { ...prev, [socketId]: part };
         });
