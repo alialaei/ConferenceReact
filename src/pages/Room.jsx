@@ -3,6 +3,17 @@ import { useParams } from 'react-router-dom';
 import io from 'socket.io-client';
 import * as mediasoupClient from 'mediasoup-client';
 
+const ICE_SERVERS = [
+  {
+    urls: ['turn:conference.mmup.org:3478'],
+    username: 'testuser',
+    credential: 'testpassword'
+  },
+  {
+    urls: ['stun:stun.l.google.com:19302']
+  }
+];
+
 const socket = io('https://webrtcserver.mmup.org', {
   path: '/socket.io',
   transports: ['websocket'],
@@ -131,7 +142,10 @@ const Room = () => {
       await new Promise(resolve => {
         socket.emit('createTransport', async (params) => {
           console.log('Creating sendTransport', params);
-          const sendTransport = deviceRef.current.createSendTransport(params);
+          const sendTransport = deviceRef.current.createSendTransport({
+            ...params,
+            iceServers: ICE_SERVERS // <--- inject your TURN/STUN here!
+          });
 
           sendTransport.on('connect', ({ dtlsParameters }, callback) => {
             socket.emit('connectTransport', { transportId: sendTransport.id, dtlsParameters }, callback);
@@ -158,7 +172,10 @@ const Room = () => {
       await new Promise(resolve => {
         socket.emit('createTransport', async (params) => {
           console.log('Creating recvTransport', params);
-          const recvTransport = deviceRef.current.createRecvTransport(params);
+          const recvTransport = deviceRef.current.createRecvTransport({
+            ...params,
+            iceServers: ICE_SERVERS // <--- and here too!
+          });
 
           recvTransport.on('connect', ({ dtlsParameters }, callback) => {
             socket.emit('connectTransport', { transportId: recvTransport.id, dtlsParameters }, callback);
