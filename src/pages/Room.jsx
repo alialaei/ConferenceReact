@@ -3,17 +3,6 @@ import { useParams } from 'react-router-dom';
 import io from 'socket.io-client';
 import * as mediasoupClient from 'mediasoup-client';
 
-const ICE_SERVERS = [
-  {
-    urls: ['turn:conference.mmup.org:3478'],
-    username: 'testuser',
-    credential: 'testpassword'
-  },
-  {
-    urls: ['stun:stun.l.google.com:19302']
-  }
-];
-
 const socket = io('https://webrtcserver.mmup.org', {
   path: '/socket.io',
   transports: ['websocket'],
@@ -144,7 +133,7 @@ const Room = () => {
           console.log('Creating sendTransport', params);
           const sendTransport = deviceRef.current.createSendTransport({
             ...params,
-            iceServers: ICE_SERVERS // <--- inject your TURN/STUN here!
+            iceServers: params.iceServers // ← from backend!
           });
 
           sendTransport.on('connect', ({ dtlsParameters }, callback) => {
@@ -174,7 +163,7 @@ const Room = () => {
           console.log('Creating recvTransport', params);
           const recvTransport = deviceRef.current.createRecvTransport({
             ...params,
-            iceServers: ICE_SERVERS // <--- and here too!
+            iceServers: params.iceServers // ← from backend!
           });
 
           recvTransport.on('connect', ({ dtlsParameters }, callback) => {
