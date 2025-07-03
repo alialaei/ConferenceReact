@@ -3,7 +3,6 @@ import { useParams } from 'react-router-dom';
 import io from 'socket.io-client';
 import * as mediasoupClient from 'mediasoup-client';
 
-// Connect to backend
 const socket = io('https://webrtcserver.mmup.org', {
   path: '/socket.io',
   transports: ['websocket'],
@@ -16,11 +15,8 @@ const Room = () => {
   const [isOwner, setIsOwner] = useState(false);
   const [approved, setApproved] = useState(false);
 
-  // socketId -> { stream, tracks }
+  // socketId -> { stream, videoTrack, audioTrack }
   const [remoteParticipants, setRemoteParticipants] = useState({});
-  const remoteParticipantsRef = useRef({});
-  remoteParticipantsRef.current = remoteParticipants;
-
   const consumedProducers = useRef(new Set());
   const deviceRef = useRef(null);
   const sendTransportRef = useRef(null);
@@ -89,9 +85,7 @@ const Room = () => {
 
   const joinRoom = () => {
     const ownerMarkerKey = `room-owner-${roomId}`;
-    let isOwnerCandidate = false;
     if (!sessionStorage.getItem(ownerMarkerKey)) {
-      isOwnerCandidate = true;
       sessionStorage.setItem(ownerMarkerKey, "1");
     }
     console.log('Joining room', roomId);
@@ -200,12 +194,15 @@ const Room = () => {
         });
 
         setRemoteParticipants(prev => {
+          // Create or clone participant object for socketId
           let part = prev[socketId] || { stream: new MediaStream(), videoTrack: null, audioTrack: null };
-          if (params.kind === 'video') {
+          // Only add track if not already present
+          if (params.kind === 'video' && !part.stream.getVideoTracks().some(t => t.id === consumer.track.id)) {
             part.videoTrack = consumer.track;
             part.stream.addTrack(consumer.track);
             console.log('Added video track to', socketId);
-          } else if (params.kind === 'audio') {
+          }
+          if (params.kind === 'audio' && !part.stream.getAudioTracks().some(t => t.id === consumer.track.id)) {
             part.audioTrack = consumer.track;
             part.stream.addTrack(consumer.track);
             console.log('Added audio track to', socketId);
@@ -215,6 +212,11 @@ const Room = () => {
       }
     });
   };
+
+  useEffect(() => {
+    // Debug log on every remote participant change
+    console.log("RemoteParticipants changed:", remoteParticipants);
+  }, [remoteParticipants]);
 
   return (
     <div style={{ padding: '2rem' }}>
@@ -235,16 +237,28 @@ const Room = () => {
                   autoPlay
                   playsInline
                   width={300}
-                  ref={el => el && (el.srcObject = stream)}
-                  style={{ marginBottom: 8 }}
+                  ref={el => {
+                    if (el && stream) {
+                      if (el.srcObject !== stream) el.srcObject = stream;
+                      el.muted = false;
+                      el.onloadedmetadata = () => { el.play().catch(e => {}); };
+                    }
+                  }}
+                  style={{ background: "#000", marginBottom: 8 }}
                 />
               )}
               {audioTrack && (
                 <audio
                   autoPlay
-                  controls={false}
-                  ref={el => el && (el.srcObject = stream)}
-                  style={{ display: 'none' }}
+                  controls
+                  ref={el => {
+                    if (el && stream) {
+                      if (el.srcObject !== stream) el.srcObject = stream;
+                      el.muted = false;
+                      el.onloadedmetadata = () => { el.play().catch(e => {}); };
+                    }
+                  }}
+                  style={{ display: 'block', marginTop: 4 }}
                 />
               )}
             </div>
