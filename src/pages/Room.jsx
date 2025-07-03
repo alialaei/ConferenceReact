@@ -1,9 +1,9 @@
+// Room.jsx
 import React, { useEffect, useRef, useState } from 'react';
 import { useParams } from 'react-router-dom';
 import io from 'socket.io-client';
 import * as mediasoupClient from 'mediasoup-client';
 
-// Your backend domain:
 const socket = io('https://webrtcserver.mmup.org', {
   path: '/socket.io',
   transports: ['websocket'],
@@ -16,18 +16,16 @@ const Room = () => {
   const [isOwner, setIsOwner] = useState(false);
   const [approved, setApproved] = useState(false);
 
-  // All remote streams
   const [remoteStreams, setRemoteStreams] = useState([]);
   const consumedProducers = useRef(new Set());
 
-  // Mediasoup device/transports
+  // Mediasoup
   const deviceRef = useRef(null);
   const sendTransportRef = useRef(null);
   const recvTransportRef = useRef(null);
 
-  // ---- SOCKET EVENTS ----
+  // ----- SOCKET EVENTS -----
   useEffect(() => {
-    // Approval flow
     socket.on('join-request', ({ socketId }) => {
       if (isOwner) {
         if (window.confirm(`Approve user ${socketId}?`)) {
@@ -39,8 +37,6 @@ const Room = () => {
     });
 
     socket.on('newProducer', ({ producerId, socketId }) => {
-      console.log('[newProducer event]', producerId, socketId);
-      // Only try to consume if we haven't already
       if (!consumedProducers.current.has(producerId)) {
         consumedProducers.current.add(producerId);
         consumeProducer(producerId);
@@ -50,7 +46,7 @@ const Room = () => {
     socket.on('join-approved', (data = {}) => {
       setApproved(true);
       initMedia().then(() => {
-        // If this user is not the owner, consume all existing producers
+        // Only consume others' producers (backend guarantees this)
         if (data.existingProducers && data.existingProducers.length) {
           data.existingProducers.forEach(({ producerId }) => {
             if (!consumedProducers.current.has(producerId)) {
@@ -74,10 +70,10 @@ const Room = () => {
 
     return () => {
       socket.off('join-request');
+      socket.off('newProducer');
       socket.off('join-approved');
       socket.off('join-denied');
       socket.off('room-closed');
-      socket.off('newProducer');
     };
   }, [isOwner]);
 
@@ -87,15 +83,13 @@ const Room = () => {
     // eslint-disable-next-line
   }, []);
 
-  // ---- JOIN ROOM LOGIC ----
-  const joinRoom = async () => {
+  const joinRoom = () => {
     const ownerMarkerKey = `room-owner-${roomId}`;
     let isOwnerCandidate = false;
     if (!sessionStorage.getItem(ownerMarkerKey)) {
       isOwnerCandidate = true;
       sessionStorage.setItem(ownerMarkerKey, "1");
     }
-
     socket.emit('join-room', { roomId }, (response = {}) => {
       setIsOwner(response.isOwner);
       if (response.isOwner || response.waitForApproval === false) {
@@ -114,14 +108,14 @@ const Room = () => {
     });
   };
 
-  // ---- MEDIASOUP BOILERPLATE ----
+  // ---- Mediasoup setup ----
   const initMedia = async () => {
     try {
-      // Get camera and mic
+      // 1. Get camera/mic
       const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
       localVideoRef.current.srcObject = stream;
 
-      // 1. Get router capabilities
+      // 2. Create device
       await new Promise(resolve => {
         socket.emit('getRouterRtpCapabilities', async (rtpCapabilities) => {
           const device = new mediasoupClient.Device();
@@ -131,7 +125,7 @@ const Room = () => {
         });
       });
 
-      // 2. Create send transport (publishing)
+      // 3. Create send transport (publishing)
       await new Promise(resolve => {
         socket.emit('createTransport', async (params) => {
           const sendTransport = deviceRef.current.createSendTransport(params);
@@ -156,7 +150,7 @@ const Room = () => {
         });
       });
 
-      // 3. Create recv transport (for consuming others)
+      // 4. Create recv transport (for consuming)
       await new Promise(resolve => {
         socket.emit('createTransport', async (params) => {
           const recvTransport = deviceRef.current.createRecvTransport(params);
@@ -174,21 +168,12 @@ const Room = () => {
     }
   };
 
-  // ---- CONSUME REMOTE ----
-  const consumeProducer = async (producerId) => {
+  // ---- Consume remote producer ----
+  const consumeProducer = (producerId) => {
     if (!recvTransportRef.current || !deviceRef.current) return;
     const { rtpCapabilities } = deviceRef.current;
     socket.emit('consume', { producerId, rtpCapabilities }, async (params) => {
       if (params && params.id) {
-        // Don't show your own stream in remote participants
-        if (params.kind === 'video' && localVideoRef.current && localVideoRef.current.srcObject) {
-          // Compare tracks
-          const localTracks = localVideoRef.current.srcObject.getVideoTracks();
-          if (localTracks.some(track => track.id === params.rtpParameters.encodings?.[0]?.rid)) {
-            // It's your own stream, skip adding to remoteStreams
-            return;
-          }
-        }
         const consumer = await recvTransportRef.current.consume({
           id: params.id,
           producerId: params.producerId,
@@ -197,13 +182,10 @@ const Room = () => {
         });
         const stream = new MediaStream([consumer.track]);
         setRemoteStreams(prev => {
-          // Avoid duplicates
-          if (prev.find(r => r.producerId === producerId)) return prev;
-          console.log('Adding remote stream for', producerId, stream);
+          // Only add if has tracks and not duplicate
+          if (!stream.getTracks().length || prev.find(r => r.producerId === producerId)) return prev;
           return [...prev, { producerId, stream }];
         });
-      } else {
-        console.warn('Failed to consume producer:', params);
       }
     });
   };
@@ -221,13 +203,15 @@ const Room = () => {
         <div>
           <h3>Remote Participants</h3>
           {remoteStreams.map(({ producerId, stream }) => (
-            <video
-              key={producerId}
-              autoPlay
-              playsInline
-              width={300}
-              ref={el => el && (el.srcObject = stream)}
-            />
+            stream.getTracks().length > 0 && (
+              <video
+                key={producerId}
+                autoPlay
+                playsInline
+                width={300}
+                ref={el => el && (el.srcObject = stream)}
+              />
+            )
           ))}
         </div>
       </div>
