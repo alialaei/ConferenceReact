@@ -234,14 +234,15 @@ const Room = () => {
             <div key={socketId}>
               {videoTrack && (
                 <video
+                  key={videoTrack.id}
                   autoPlay
                   playsInline
                   width={300}
                   ref={el => {
                     if (el && stream) {
-                      if (el.srcObject !== stream) el.srcObject = stream;
+                      el.srcObject = stream;
                       el.muted = false;
-                      el.onloadedmetadata = () => { el.play().catch(e => {}); };
+                      el.onloadedmetadata = () => { el.play().catch(() => {}); };
                     }
                   }}
                   style={{ background: "#000", marginBottom: 8 }}
@@ -249,13 +250,14 @@ const Room = () => {
               )}
               {audioTrack && (
                 <audio
+                  key={audioTrack.id}
                   autoPlay
                   controls
                   ref={el => {
                     if (el && stream) {
-                      if (el.srcObject !== stream) el.srcObject = stream;
+                      el.srcObject = stream;
                       el.muted = false;
-                      el.onloadedmetadata = () => { el.play().catch(e => {}); };
+                      el.onloadedmetadata = () => { el.play().catch(() => {}); };
                     }
                   }}
                   style={{ display: 'block', marginTop: 4 }}
