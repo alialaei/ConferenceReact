@@ -180,6 +180,15 @@ const Room = () => {
     const { rtpCapabilities } = deviceRef.current;
     socket.emit('consume', { producerId, rtpCapabilities }, async (params) => {
       if (params && params.id) {
+        // Don't show your own stream in remote participants
+        if (params.kind === 'video' && localVideoRef.current && localVideoRef.current.srcObject) {
+          // Compare tracks
+          const localTracks = localVideoRef.current.srcObject.getVideoTracks();
+          if (localTracks.some(track => track.id === params.rtpParameters.encodings?.[0]?.rid)) {
+            // It's your own stream, skip adding to remoteStreams
+            return;
+          }
+        }
         const consumer = await recvTransportRef.current.consume({
           id: params.id,
           producerId: params.producerId,
@@ -188,7 +197,9 @@ const Room = () => {
         });
         const stream = new MediaStream([consumer.track]);
         setRemoteStreams(prev => {
+          // Avoid duplicates
           if (prev.find(r => r.producerId === producerId)) return prev;
+          console.log('Adding remote stream for', producerId, stream);
           return [...prev, { producerId, stream }];
         });
       } else {
