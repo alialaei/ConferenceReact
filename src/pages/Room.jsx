@@ -10,98 +10,95 @@ export default function Room() {
   const { roomId } = useParams();
   const localRef   = useRef(null);
 
-  const [isOwner,   setIsOwner]   = useState(false);
-  const [approved,  setApproved]  = useState(false);
-  const [people,    setPeople]    = useState({});        // socketId -> {stream}
-  const consumers   = useRef(new Set());
+  const [isOwner,  setIsOwner]  = useState(false);
+  const [approved, setApproved] = useState(false);
+  const [peers,    setPeers]    = useState({}); // socketId -> {stream}
 
-  const device      = useRef(null);
-  const sendT       = useRef(null);
-  const recvT       = useRef(null);
+  const device  = useRef(null);
+  const sendT   = useRef(null);
+  const recvT   = useRef(null);
+  const seen    = useRef(new Set());            // producerIds already consumed
 
-  /* ---------- one-time join ------------------------------------------- */
+  /* ---------- join once ---------------------------------------------- */
   useEffect(() => {
-    socket.emit('join-room', { roomId }, ({ isOwner }) => {
-      setIsOwner(isOwner);
-      if (isOwner) setApproved(true);     // owner auto-approved
+    socket.emit('join-room', { roomId }, res => {
+      setIsOwner(res.isOwner);
+      if (res.isOwner) setApproved(true);
     });
   }, [roomId]);
 
-  /* ---------- socket listeners ---------------------------------------- */
+  /* ---------- socket listeners --------------------------------------- */
   useEffect(() => {
-    const onJoinReq  = ({ socketId }) => isOwner &&
+    const joinReq = ({ socketId }) => {
+      if (!isOwner) return;
       window.confirm(`Accept ${socketId}?`)
         ? socket.emit('approve-join', { targetSocketId: socketId })
         : socket.emit('deny-join',    { targetSocketId: socketId });
-
-    const onJoinOk   = ({ existingProducers }) => {
-      setApproved(true);
-      initMedia().then(() => existingProducers.forEach(p => handleProducer(p)));
     };
 
-    const onNewProd  = handleProducer;
-    const onDenied   = () => alert('Join denied') || window.location.replace('/');
-    const onClosed   = () => alert('Room closed') || window.location.replace('/');
+    const joinOk  = ({ existingProducers }) => {
+      setApproved(true);
+      initMedia().then(() => existingProducers.forEach(handleProducer));
+    };
 
-    socket
-      .on('join-request',  onJoinReq)
-      .on('join-approved', onJoinOk)
-      .on('newProducer',   onNewProd)
-      .on('join-denied',   onDenied)
-      .on('room-closed',   onClosed);
+    socket.on('join-request',  joinReq)
+          .on('join-approved', joinOk)
+          .on('newProducer',   handleProducer)
+          .on('join-denied',   () => alert('Join denied') || window.location.replace('/'))
+          .on('room-closed',   () => alert('Room closed') || window.location.replace('/'));
 
-    return () => socket.off('join-request',  onJoinReq)
-                       .off('join-approved', onJoinOk)
-                       .off('newProducer',   onNewProd)
-                       .off('join-denied',   onDenied)
-                       .off('room-closed',   onClosed);
+    return () => socket.off('join-request',  joinReq)
+                       .off('join-approved', joinOk)
+                       .off('newProducer',   handleProducer);
   }, [isOwner]);
 
   /* ---------- mediasoup bootstrap ------------------------------------ */
   async function initMedia() {
-    /* get cam/mic ------------------------------------------------------ */
+    /* 1. local camera -------------------------------------------------- */
     const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
-    localRef.current.srcObject = stream;
+    if (localRef.current) localRef.current.srcObject = stream;
 
-    /* router caps ------------------------------------------------------ */
-    const rtpCaps = await new Promise(res =>
-      socket.emit('getRouterRtpCapabilities', res));
-
+    /* 2. router capabilities ------------------------------------------ */
+    const rtpCaps = await new Promise(res => socket.emit('getRouterRtpCapabilities', res));
     device.current = new mediasoupClient.Device();
     await device.current.load({ routerRtpCapabilities: rtpCaps });
 
-    /* send transport --------------------------------------------------- */
+    /* 3. send transport ----------------------------------------------- */
     const paramsSend = await new Promise(res => socket.emit('createTransport', res));
-    sendT.current    = device.current.createSendTransport(paramsSend);
+    sendT.current = device.current.createSendTransport(paramsSend);
 
-    sendT.current.on('connect', (d, cb) =>
-      socket.emit('connectTransport', { transportId: sendT.current.id, dtlsParameters: d }, cb));
+    sendT.current.on('connect',
+      ({ dtlsParameters }, cb) => socket.emit(
+        'connectTransport', { transportId: sendT.current.id, dtlsParameters }, cb));
 
-    sendT.current.on('produce', (p, cb) =>
-      socket.emit('produce', { transportId: sendT.current.id, ...p }, ({ id }) => cb({ id })));
+    sendT.current.on('produce',
+      (p, cb) => socket.emit('produce',
+        { transportId: sendT.current.id, ...p }, ({ id }) => cb({ id })));
 
     await Promise.all(stream.getTracks().map(t => sendT.current.produce({ track: t })));
 
-    /* recv transport --------------------------------------------------- */
+    /* 4. recv transport ----------------------------------------------- */
     const paramsRecv = await new Promise(res => socket.emit('createTransport', res));
-    recvT.current    = device.current.createRecvTransport(paramsRecv);
+    recvT.current = device.current.createRecvTransport(paramsRecv);
 
-    recvT.current.on('connect', (d, cb) =>
-      socket.emit('connectTransport', { transportId: recvT.current.id, dtlsParameters: d }, cb));
+    recvT.current.on('connect',
+      ({ dtlsParameters }, cb) => socket.emit(
+        'connectTransport', { transportId: recvT.current.id, dtlsParameters }, cb));
   }
 
   /* ---------- consume helper ----------------------------------------- */
   function handleProducer({ producerId, socketId }) {
-    if (consumers.current.has(producerId) || !recvT.current) return;
-    consumers.current.add(producerId);
+    if (!recvT.current || seen.current.has(producerId)) return;
+    seen.current.add(producerId);
 
-    socket.emit('consume', { producerId, rtpCapabilities: device.current.rtpCapabilities },
+    socket.emit('consume',
+      { producerId, rtpCapabilities: device.current.rtpCapabilities },
       async ({ id, kind, rtpParameters }) => {
         const consumer = await recvT.current.consume({ id, producerId, kind, rtpParameters });
-        setPeople(p => {
-          const stream = p[socketId]?.stream ?? new MediaStream();
+        setPeers(prev => {
+          const stream = prev[socketId]?.stream ?? new MediaStream();
           stream.addTrack(consumer.track);
-          return { ...p, [socketId]: { stream } };
+          return { ...prev, [socketId]: { stream } };
         });
       });
   }
@@ -110,14 +107,16 @@ export default function Room() {
   return (
     <div style={{ padding: 32 }}>
       <h2>Room {roomId}</h2>
-      {isOwner   && !approved && <p>Waiting for guests…</p>}
-      {!isOwner  && !approved && <p>Waiting for owner approval…</p>}
+      {isOwner  && !approved && <p>Waiting for guests…</p>}
+      {!isOwner && !approved && <p>Waiting for owner approval…</p>}
 
-      <video ref={localRef}  autoPlay playsInline muted width={320} style={{ background:'#000' }} />
+      <video ref={localRef} autoPlay playsInline muted width={320}
+             style={{ background:'#000', marginRight:16 }} />
 
-      {Object.entries(people).map(([id, { stream }]) =>
+      {Object.entries(peers).map(([id, { stream }]) => (
         <video key={id} autoPlay playsInline width={320}
-               ref={el => el && (el.srcObject = stream)} />)}
+               ref={el => el && (el.srcObject = stream)} />
+      ))}
     </div>
   );
 }
