@@ -21,9 +21,16 @@ export default function Room() {
 
   /* ---------- join once ---------------------------------------------- */
   useEffect(() => {
-    socket.emit('join-room', { roomId }, res => {
-      setIsOwner(res.isOwner);
-      if (res.isOwner) setApproved(true);
+    socket.emit('join-room', { roomId }, (response = {}) => {
+      console.log('[join-room cb]', response);
+      setIsOwner(response.isOwner);
+      if (response.isOwner || response.waitForApproval === false) {
+        setApproved(true);
+        initMedia().then(() => {
+        if (response.existingProducers?.length)
+            response.existingProducers.forEach(handleProducer);
+        });
+      }
     });
   }, [roomId]);
 
