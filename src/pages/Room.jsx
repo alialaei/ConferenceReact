@@ -19,6 +19,7 @@ export default function Room() {
   const device    = useRef(null);
   const sendT     = useRef(null);
   const recvT     = useRef(null);
+  const audioProd = useRef(null);
 
   /* ---------- join -------------------------------------------------- */
   useEffect(() => {
@@ -110,7 +111,12 @@ export default function Room() {
     );
 
     /* publish audio & video */
-    await Promise.all(stream.getTracks().map(t => sendT.current.produce({ track:t })));
+    await Promise.all(
+      stream.getTracks().map(async track => {
+        const producer = await sendT.current.produce({ track });
+        if (track.kind === 'audio') audioProd.current = producer;   // ⬅️ save it
+      })
+    );
 
     /* ---------- RECV transport ------------------------------------ */
     const paramsRecv = await new Promise(res =>
@@ -176,10 +182,15 @@ export default function Room() {
       
       <div style={{ margin:'8px 0' }}>
         <button onClick={() => {
-          const track = localRef.current?._micTrack;
-          if (!track) return;
-          track.enabled = !track.enabled;
-          setMicEnabled(track.enabled);
+          const p = audioProd.current;
+          if (!p) return;
+          if (p.paused) {
+            p.resume();
+            setMicEnabled(true);
+          } else {
+            p.pause();
+            setMicEnabled(false);
+  }
         }}>
           {micEnabled ? 'Mute mic' : 'Un-mute mic'}
         </button>
