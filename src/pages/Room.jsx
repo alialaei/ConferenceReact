@@ -7,30 +7,34 @@ const socket = io('https://webrtcserver.mmup.org', { transports: ['websocket'] }
 
 export default function Room() {
   const { roomId } = useParams();
-  const localRef   = useRef(null);
+
+  const localRef = useRef(null);
 
   const [isOwner,  setIsOwner]  = useState(false);
   const [approved, setApproved] = useState(false);
-  const [people,   setPeople]   = useState({});
+  const [people,   setPeople]   = useState({});          // socketId → { stream }
 
   const consumers = useRef(new Set());
-  const pending   = useRef([]);             //  ← NEW
-  const device    = useRef(null);
-  const sendT     = useRef(null);
-  const recvT     = useRef(null);
+  const pending   = useRef([]);                          // producers queued before recvT ready
 
-  /* --- join --------------------------------------------------------- */
+  const device = useRef(null);
+  const sendT  = useRef(null);
+  const recvT  = useRef(null);
+
+  /* ---------- join -------------------------------------------------- */
   useEffect(() => {
     socket.emit('join-room', { roomId }, (r = {}) => {
       setIsOwner(r.isOwner);
       if (r.isOwner || r.waitForApproval === false) {
-        setApproved(true); initMedia();
+        setApproved(true);
+        initMedia();
       }
     });
   }, [roomId]);
 
-  /* --- listeners ---------------------------------------------------- */
+  /* ---------- socket listeners ------------------------------------- */
   useEffect(() => {
+
     const approve = ({ socketId }) =>
       window.confirm(`Accept ${socketId}?`)
         ? socket.emit('approve-join', { targetSocketId: socketId })
@@ -45,66 +49,111 @@ export default function Room() {
     socket.on('join-approved', joined);
     socket.on('newProducer',   handleProducer);
 
-    socket.on('join-denied', () => alert('Join denied')          || location.replace('/'));
-    socket.on('room-closed', () => alert('Room closed by owner') || location.replace('/'));
+    socket.on('join-denied', () => {
+      alert('Join denied');  location.replace('/');
+    });
+    socket.on('room-closed', () => {
+      alert('Room closed by owner');  location.replace('/');
+    });
 
     return () => socket.off('join-request')
                        .off('join-approved')
                        .off('newProducer');
   }, [isOwner]);
 
-  /* --- mediasoup bootstrap ----------------------------------------- */
+  /* ---------- mediasoup bootstrap ---------------------------------- */
   async function initMedia() {
-    if (sendT.current) return;
+    if (sendT.current) return;                       // already initialised
 
-    const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+    /* local camera */
+    const stream = await navigator.mediaDevices.getUserMedia({ video:true, audio:true });
     localRef.current.srcObject = stream;
 
-    const rtpCaps = await new Promise(res => socket.emit('getRouterRtpCapabilities', res));
+    /* device & router caps */
+    const routerCaps = await new Promise(res =>
+      socket.emit('getRouterRtpCapabilities', res));
     device.current = new mediasoupClient.Device();
-    await device.current.load({ routerRtpCapabilities: rtpCaps });
+    await device.current.load({ routerRtpCapabilities: routerCaps });
 
-    const paramsSend = await new Promise(res => socket.emit('createTransport', { consuming:false }, res));
+    /* ---------- SEND transport ------------------------------------ */
+    const paramsSend = await new Promise(res =>
+      socket.emit('createTransport', { consuming:false }, res));
     sendT.current = device.current.createSendTransport({
       ...paramsSend,
-      iceServers: paramsSend.iceServers
+      iceServers        : paramsSend.iceServers,
+      iceTransportPolicy: 'relay'
     });
 
-    sendT.current.on('connect', (d, cb) =>
-      socket.emit('connectTransport', { transportId: sendT.current.id, dtlsParameters: d }, cb));
-    sendT.current.on('produce', (p, cb) =>
-      socket.emit('produce', { transportId: sendT.current.id, ...p }, ({ id }) => cb({ id })));
-    await Promise.all(stream.getTracks().map(t => sendT.current.produce({ track: t })));
+    sendT.current.on('connect', (dtlsParams, done) => {
+      socket.emit(
+        'connectTransport',
+        { transportId: sendT.current.id, dtlsParameters: dtlsParams },
+        (ack) => {
+          if (ack?.error) {
+            console.error('SEND connect failed:', ack.error);
+            return done(ack.error);
+          }
+          done();                                   // ✅ mediasoup happy
+        }
+      );
+    });
 
-    const paramsRecv = await new Promise(res => socket.emit('createTransport', { consuming:true },  res));
+    sendT.current.on('produce', (p, done) => {
+      socket.emit(
+        'produce',
+        { transportId: sendT.current.id, ...p },
+        ({ id, error }) => (error ? done(error) : done({ id }))
+      );
+    });
+
+    /* publish both tracks */
+    await Promise.all(stream.getTracks().map(t => sendT.current.produce({ track:t })));
+
+    /* ---------- RECV transport ------------------------------------ */
+    const paramsRecv = await new Promise(res =>
+      socket.emit('createTransport', { consuming:true }, res));
     recvT.current = device.current.createRecvTransport({
       ...paramsRecv,
-      iceServers: paramsRecv.iceServers
+      iceServers        : paramsRecv.iceServers,
+      iceTransportPolicy: 'relay'
     });
 
-    recvT.current.on('connect', (d, cb) =>
-      socket.emit('connectTransport', { transportId: recvT.current.id, dtlsParameters: d }, cb));
+    recvT.current.on('connect', (dtlsParams, done) => {
+      socket.emit(
+        'connectTransport',
+        { transportId: recvT.current.id, dtlsParameters: dtlsParams },
+        (ack) => {
+          if (ack?.error) {
+            console.error('RECV connect failed:', ack.error);
+            return done(ack.error);
+          }
+          done();
+        }
+      );
+    });
 
-    /* consume anything queued while recvT was not ready */
+    /* consume any producers announced before recvT became ready */
     while (pending.current.length) consumeProducer(pending.current.shift());
   }
 
-  /* --- producer handler -------------------------------------------- */
+  /* ---------- producer helper ------------------------------------- */
   function handleProducer(info) {
-    if (!recvT.current) {                   // queue until transport ready
+    if (!recvT.current) {               // queue until we have a recv transport
       pending.current.push(info);
       return;
     }
     consumeProducer(info);
   }
 
-  function consumeProducer({ producerId, socketId }) {
+  async function consumeProducer({ producerId, socketId }) {
     if (consumers.current.has(producerId)) return;
     consumers.current.add(producerId);
 
-    socket.emit('consume',
+    socket.emit(
+      'consume',
       { producerId, rtpCapabilities: device.current.rtpCapabilities },
-      async ({ id, kind, rtpParameters }) => {
+      async ({ id, kind, rtpParameters, error }) => {
+        if (error) { console.error('consume error:', error); return; }
         const consumer = await recvT.current.consume({ id, producerId, kind, rtpParameters });
         await consumer.resume();
 
@@ -113,17 +162,21 @@ export default function Room() {
           stream.addTrack(consumer.track);
           return { ...p, [socketId]: { stream } };
         });
-      });
+      }
+    );
   }
 
-  /* --- UI ----------------------------------------------------------- */
+  /* ---------- UI --------------------------------------------------- */
   return (
-    <div style={{ padding: 32 }}>
+    <div style={{ padding:32 }}>
       <h2>Room {roomId}</h2>
+
       {isOwner  && !approved && <p>Waiting for guests…</p>}
       {!isOwner && !approved && <p>Waiting for owner approval…</p>}
 
-      <video ref={localRef} autoPlay playsInline muted width={320} style={{ background:'#000' }} />
+      <video ref={localRef}
+             autoPlay playsInline muted width={320}
+             style={{ background:'#000' }} />
 
       {Object.entries(people).map(([id, { stream }]) => (
         <video key={id} autoPlay playsInline width={320}
