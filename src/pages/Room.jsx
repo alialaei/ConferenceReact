@@ -11,22 +11,33 @@ export default function Room() {
 
   const [isOwner,  setIsOwner]  = useState(false);
   const [approved, setApproved] = useState(false);
-  const [people,   setPeople]   = useState({});          // socketId → { stream }
+  const [people,   setPeople]   = useState({});     // socketId → { stream }
 
   const consumers = useRef(new Set());
   const device    = useRef(null);
   const sendT     = useRef(null);
   const recvT     = useRef(null);
 
-  /* ---------- join --------------------------------------------------- */
+  /* ---------- first contact: join the room -------------------------- */
   useEffect(() => {
-    socket.emit('join-room', { roomId }, ({ isOwner }) => {
-      setIsOwner(isOwner);
-      if (isOwner) setApproved(true); // owner auto-approved
+    socket.emit('join-room', { roomId }, (res = {}) => {
+      setIsOwner(res.isOwner);
+
+      // OWNER → start media immediately
+      if (res.isOwner) {
+        setApproved(true);
+        initMedia();
+      }
+
+      // GUEST with open room (no approval needed)
+      if (res.waitForApproval === false) {
+        setApproved(true);
+        initMedia();
+      }
     });
   }, [roomId]);
 
-  /* ---------- socket listeners -------------------------------------- */
+  /* ---------- socket listeners ------------------------------------- */
   useEffect(() => {
     const approve = ({ socketId }) =>
       window.confirm(`Accept ${socketId}?`)
@@ -38,7 +49,7 @@ export default function Room() {
       initMedia().then(() => existingProducers.forEach(handleProducer));
     };
 
-    socket.on('join-request',  isOwner && approve);
+    socket.on('join-request',  ({ socketId }) => isOwner && approve({ socketId }));
     socket.on('join-approved', joined);
     socket.on('newProducer',   handleProducer);
 
@@ -50,8 +61,10 @@ export default function Room() {
                        .off('newProducer');
   }, [isOwner]);
 
-  /* ---------- mediasoup bootstrap ----------------------------------- */
+  /* ---------- mediasoup bootstrap ---------------------------------- */
   async function initMedia() {
+    if (sendT.current) return; // already initialised
+
     const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
     localRef.current.srcObject = stream;
 
@@ -65,7 +78,7 @@ export default function Room() {
     sendT.current = device.current.createSendTransport({
       ...paramsSend,
       iceServers        : paramsSend.iceServers,
-      iceTransportPolicy: 'relay'                // <--💡 force TURN
+      iceTransportPolicy: 'relay'                // force TURN
     });
 
     sendT.current.on('connect', (d, cb) =>
@@ -81,14 +94,14 @@ export default function Room() {
     recvT.current = device.current.createRecvTransport({
       ...paramsRecv,
       iceServers        : paramsRecv.iceServers,
-      iceTransportPolicy: 'relay'                // <--💡 force TURN
+      iceTransportPolicy: 'relay'                // force TURN
     });
 
     recvT.current.on('connect', (d, cb) =>
       socket.emit('connectTransport', { transportId: recvT.current.id, dtlsParameters: d }, cb));
   }
 
-  /* ---------- consume helper --------------------------------------- */
+  /* ---------- consume helper -------------------------------------- */
   function handleProducer({ producerId, socketId }) {
     if (consumers.current.has(producerId) || !recvT.current) return;
     consumers.current.add(producerId);
@@ -105,7 +118,7 @@ export default function Room() {
       });
   }
 
-  /* ---------- UI ---------------------------------------------------- */
+  /* ---------- UI --------------------------------------------------- */
   return (
     <div style={{ padding: 32 }}>
       <h2>Room {roomId}</h2>
