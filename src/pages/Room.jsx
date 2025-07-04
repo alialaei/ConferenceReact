@@ -1,34 +1,35 @@
 import { useEffect, useState, useRef } from 'react';
-import { useParams }   from 'react-router-dom';
-import io              from 'socket.io-client';
-import * as mediasoup  from 'mediasoup-client';
+import { useParams } from 'react-router-dom';
+import io from 'socket.io-client';
+import * as mediasoup from 'mediasoup-client';
 
-const socket = io('https://webrtcserver.mmup.org', { transports:['websocket'] });
-const TILE_W = 320;               // base tile width for the grid
+const socket = io('https://webrtcserver.mmup.org', { transports: ['websocket'] });
+const TILE_W = 320;
 
 export default function Room() {
   const { roomId } = useParams();
 
-  /* ------------- refs & state ------------------------------------- */
-  const localVideoRef   = useRef(null);
-  const device          = useRef(null);
-  const sendT           = useRef(null);
-  const recvT           = useRef(null);
-  const consumers       = useRef(new Set());
-  const pending         = useRef([]);
+  /* ---------- refs + state --------------------------------------- */
+  const localVideoRef = useRef(null);
+  const device  = useRef(null);
+  const sendT   = useRef(null);
+  const recvT   = useRef(null);
+  const pending = useRef([]);
+  const consumers = useRef(new Set());
 
-  const audioProducer   = useRef(null);     // for mute/un-mute
-  const shareProducer   = useRef(null);     // our own screen share
+  const audioProducer = useRef(null);
+  const shareProducer = useRef(null);
 
-  const [localStream, setLocalStream]   = useState(null);
-  const [isOwner,     setIsOwner]       = useState(false);
-  const [approved,    setApproved]      = useState(false);
-  const [people,      setPeople]        = useState({});   // socketId → { stream }
-  const [micOn,       setMicOn]         = useState(true);
-  const [stageId,     setStageId]       = useState(null); // null => grid
-  const [share,       setShare]         = useState(null); // { socketId, stream }
+  const [localStream, setLocalStream] = useState(null);
+  const [people,      setPeople]      = useState({}); // socketId → { stream }
+  const [share,       setShare]       = useState(null); // { socketId, stream }
 
-  /* ------------- join --------------------------------------------- */
+  const [isOwner,  setIsOwner]  = useState(false);
+  const [approved, setApproved] = useState(false);
+  const [micOn,    setMicOn]    = useState(true);
+  const [stageId,  setStageId]  = useState(null);
+
+  /* ---------- join ----------------------------------------------- */
   useEffect(() => {
     socket.emit('join-room', { roomId }, (r = {}) => {
       setIsOwner(r.isOwner);
@@ -39,7 +40,7 @@ export default function Room() {
     });
   }, [roomId]);
 
-  /* ------------- listeners ---------------------------------------- */
+  /* ---------- socket listeners ----------------------------------- */
   useEffect(() => {
     const approve = ({ socketId }) =>
       window.confirm(`Accept ${socketId}?`)
@@ -56,7 +57,7 @@ export default function Room() {
     socket.on('newProducer',   handleProducer);
 
     socket.on('participant-left', ({ socketId }) => {
-      setPeople(p => { const cp = { ...p }; delete cp[socketId]; return cp; });
+      setPeople(p => { const c = { ...p }; delete c[socketId]; return c; });
       if (share?.socketId === socketId) setShare(null);
     });
 
@@ -69,96 +70,102 @@ export default function Room() {
                        .off('participant-left');
   }, [isOwner, share]);
 
-  /* ------------- mediasoup bootstrap ------------------------------ */
+  /* ---------- mediasoup bootstrap --------------------------------- */
   async function initMedia() {
     if (sendT.current) return;
 
-    /* local cam & mic */
-    const cam = await navigator.mediaDevices.getUserMedia({ video:true, audio:true });
+    const cam = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
     setLocalStream(cam);
-
-    /* attach immediately */
     if (localVideoRef.current) localVideoRef.current.srcObject = cam;
 
-    /* device */
-    const caps = await new Promise(res => socket.emit('getRouterRtpCapabilities', res));
+    const caps = await new Promise(r => socket.emit('getRouterRtpCapabilities', r));
     device.current = new mediasoup.Device();
-    await device.current.load({ routerRtpCapabilities:caps });
+    await device.current.load({ routerRtpCapabilities: caps });
 
-    /* SEND transport */
-    const pSend = await new Promise(res => socket.emit('createTransport', { consuming:false }, res));
+    /* SEND */
+    const ps = await new Promise(r => socket.emit('createTransport', { consuming: false }, r));
     sendT.current = device.current.createSendTransport({
-      ...pSend, iceServers:pSend.iceServers, iceTransportPolicy:'relay'
+      ...ps, iceServers: ps.iceServers, iceTransportPolicy: 'relay'
     });
 
     sendT.current.on('connect', ({ dtlsParameters }, ok, bad) =>
       socket.emit('connectTransport',
-        { transportId:sendT.current.id, dtlsParameters },
-        ack => ack?.error ? bad(ack.error) : ok()));
+        { transportId: sendT.current.id, dtlsParameters },
+        a => a?.error ? bad(a.error) : ok()));
 
     sendT.current.on('produce', ({ kind, rtpParameters, appData }, ok, bad) =>
       socket.emit('produce',
-        { transportId:sendT.current.id, kind, rtpParameters, appData },
+        { transportId: sendT.current.id, kind, rtpParameters, appData },
         ({ id, error }) => error ? bad(error) : ok({ id })));
 
-    /* publish cam+mic */
     await Promise.all(
-      cam.getTracks().map(async tr => {
-        const prod = await sendT.current.produce({ track:tr });
-        if (tr.kind === 'audio') audioProducer.current = prod;
+      cam.getTracks().map(async t => {
+        const p = await sendT.current.produce({ track: t });
+        if (t.kind === 'audio') audioProducer.current = p;
       })
     );
 
-    /* RECV transport */
-    const pRecv = await new Promise(res => socket.emit('createTransport', { consuming:true }, res));
+    /* RECV */
+    const pr = await new Promise(r => socket.emit('createTransport', { consuming: true }, r));
     recvT.current = device.current.createRecvTransport({
-      ...pRecv, iceServers:pRecv.iceServers, iceTransportPolicy:'relay'
+      ...pr, iceServers: pr.iceServers, iceTransportPolicy: 'relay'
     });
 
     recvT.current.on('connect', ({ dtlsParameters }, ok, bad) =>
       socket.emit('connectTransport',
-        { transportId:recvT.current.id, dtlsParameters },
-        ack => ack?.error ? bad(ack.error) : ok()));
+        { transportId: recvT.current.id, dtlsParameters },
+        a => a?.error ? bad(a.error) : ok()));
 
-    /* flush queued producers */
     while (pending.current.length) consumeProducer(pending.current.shift());
   }
 
-  /* ------------- producer helpers --------------------------------- */
-  function handleProducer(info){
-    if (!recvT.current){ pending.current.push(info); return; }
+  /* ---------- consume helpers ------------------------------------- */
+  function handleProducer(info) {
+    if (!recvT.current) { pending.current.push(info); return; }
     consumeProducer(info);
   }
 
-  function consumeProducer({ producerId, socketId }){
+  function consumeProducer({ producerId, socketId }) {
     if (consumers.current.has(producerId)) return;
     consumers.current.add(producerId);
 
     socket.emit(
       'consume',
-      { producerId, rtpCapabilities:device.current.rtpCapabilities },
+      { producerId, rtpCapabilities: device.current.rtpCapabilities },
       async ({ id, kind, rtpParameters, error }) => {
         if (error) return console.error(error);
         const cons = await recvT.current.consume({ id, producerId, kind, rtpParameters });
         await cons.resume();
 
-        // detect screen share by label (Chrome/Firefox) or by contentHint
+        /* 🔧 detect screen track ---------------------------------- */
         const isScreen =
           kind === 'video' &&
-          (cons.track.label.toLowerCase().includes('screen') ||
+          (cons.track.contentHint === 'screen' ||
+           cons.track.label.toLowerCase().includes('screen') ||
            cons.track.label.toLowerCase().includes('share'));
 
-        setPeople(p => {
-          const stream = p[socketId]?.stream ?? new MediaStream();
-          stream.addTrack(cons.track);
-          return { ...p, [socketId]:{ stream } };
-        });
+        /* clean-up when producer / track ends 🔧 ------------------ */
+        const removeShareIfMe = () =>
+          setShare(s => (s && s.socketId === socketId ? null : s));
+        cons.on('producerclose', removeShareIfMe);
+        cons.track.onended      = removeShareIfMe;
 
-        if (isScreen) setShare({ socketId, stream:new MediaStream([cons.track]) });
-      });
+        if (isScreen) {
+          /* 🔧 keep it separate – do *not* add to camera stream */
+          setShare({ socketId, stream: new MediaStream([cons.track]) });
+        } else {
+          /* normal cam / mic */
+          setPeople(p => {
+            const stream = p[socketId]?.stream ?? new MediaStream();
+            stream.addTrack(cons.track);
+            return { ...p, [socketId]: { stream } };
+          });
+        }
+      }
+    );
   }
 
-  /* ------------- controls ----------------------------------------- */
+  /* ---------- controls -------------------------------------------- */
   const toggleMic = () => {
     const p = audioProducer.current; if (!p) return;
     p.paused ? p.resume() : p.pause();
@@ -166,91 +173,69 @@ export default function Room() {
   };
 
   const startShare = async () => {
-    if (share) return;                               // someone already sharing
-    try{
-      const disp = await navigator.mediaDevices.getDisplayMedia({ video:true, audio:false });
+    if (share) return;               // someone already sharing
+    try {
+      const disp = await navigator.mediaDevices.getDisplayMedia({ video: true });
       const track = disp.getVideoTracks()[0];
-
-      /* close when the user stops from browser UI */
       track.onended = stopShare;
 
       shareProducer.current = await sendT.current.produce({
-        track, appData:{ screen:true }
+        track, appData: { screen: true }
       });
-
-      setShare({ socketId:'you', stream:new MediaStream([track]) });
-    }catch(e){ console.warn(e); }
+      setShare({ socketId: 'you', stream: new MediaStream([track]) });
+    } catch (e) { /* user cancelled */ }
   };
 
-  const stopShare = async () => {
+  const stopShare = () => {
     if (!shareProducer.current) return;
-    shareProducer.current.close();                   // informs the SFU
+    shareProducer.current.close();
     shareProducer.current = null;
     setShare(null);
   };
 
-  /* ------------- rendering helpers -------------------------------- */
-  const fullButton = (onClick) => (
-    <button onClick={onClick} style={styles.fullBtn}>⤢</button>
-  );
-
-  /* ------------- JSX ---------------------------------------------- */
+  /* ---------- UI --------------------------------------------------- */
   return (
     <div style={styles.wrapper}>
-      {/* top bar --------------------------------------------------- */}
       <header style={styles.header}>
         <h3>Room {roomId}</h3>
-
-        <button onClick={toggleMic}>
-          {micOn ? 'Mute mic ⏸' : 'Un-mute 🔊'}
-        </button>
-
+        <button onClick={toggleMic}>{micOn ? 'Mute ⏸' : 'Un-mute 🔊'}</button>
         {share
           ? (share.socketId === 'you'
-               ? <button onClick={stopShare}>Stop share 🛑</button>
-               : <button disabled>Screen in progress…</button>)
+                ? <button onClick={stopShare}>Stop share 🛑</button>
+                : <button disabled>Screen in progress…</button>)
           : <button onClick={startShare}>Share screen 🖥️</button>}
       </header>
 
-      {/* stage OR grid ------------------------------------------- */}
       {stageId ? (
-        <Stage
-          peerId={stageId}
-          stream={stageId==='you' ? localStream : people[stageId]?.stream}
-          onExit={()=>setStageId(null)}
-        />
+        <Stage peerId={stageId}
+               stream={stageId === 'you' ? localStream : people[stageId]?.stream}
+               onExit={() => setStageId(null)} />
       ) : (
         <>
-          {/* screen share (if any) */}
           {share && (
             <div style={styles.shareBox}>
-              <video autoPlay playsInline
-                     muted={share.socketId==='you'}
+              <video autoPlay playsInline muted={share.socketId === 'you'}
                      ref={el => el && (el.srcObject = share.stream)}
                      style={styles.shareVideo}/>
               <span style={styles.shareLabel}>
-                {share.socketId==='you' ? 'Your screen' : `${share.socketId}'s screen`}
+                {share.socketId === 'you' ? 'Your screen' : `${share.socketId}'s screen`}
               </span>
             </div>
           )}
 
-          {/* grid of cameras */}
           <div style={styles.grid}>
-            {/* local (you) */}
             <Tile
               peerId="you"
               stream={localStream}
               refEl={localVideoRef}
-              onStage={()=>setStageId('you')}
-              fullBtn={fullButton(()=>setStageId('you'))}
+              onStage={() => setStageId('you')}
             />
 
             {Object.entries(people).map(([id, { stream }]) => (
               <Tile key={id}
                     peerId={id}
                     stream={stream}
-                    onStage={()=>setStageId(id)}
-                    fullBtn={fullButton(()=>setStageId(id))}/>
+                    onStage={() => setStageId(id)}/>
             ))}
           </div>
         </>
@@ -259,31 +244,27 @@ export default function Room() {
   );
 }
 
-/* ------------ Tile component -------------------------------------- */
-function Tile({ peerId, stream, refEl, onStage, fullBtn }){
+/* ---------- small presentational helpers -------------------------- */
+function Tile({ peerId, stream, refEl, onStage }) {
   return (
-    <div style={styles.tile}>
+    <div style={styles.tile} onClick={onStage}>
       <video
         ref={el => {
           if (refEl) refEl.current = el;
           if (el && stream) el.srcObject = stream;
         }}
-        autoPlay playsInline muted={peerId==='you'}
-        style={styles.vid}
-      />
-      <span style={styles.label}>{peerId==='you' ? 'You' : peerId}</span>
-      {fullBtn /* top-right expand button */}
-      {/* click anywhere also toggles stage */}
-      <div style={styles.clickCatcher} onClick={onStage}/>
+        autoPlay playsInline muted={peerId === 'you'}
+        style={styles.vid}/>
+      <span style={styles.label}>{peerId === 'you' ? 'You' : peerId}</span>
+      <button style={styles.fullBtn}>⤢</button>
     </div>
   );
 }
 
-/* ------------ Stage (full-width) ---------------------------------- */
-function Stage({ peerId, stream, onExit }){
+function Stage({ peerId, stream, onExit }) {
   return (
     <div style={styles.stage}>
-      <video autoPlay playsInline muted={peerId==='you'}
+      <video autoPlay playsInline muted={peerId === 'you'}
              ref={el => el && (el.srcObject = stream)}
              style={styles.stageVideo}/>
       <button style={styles.closeBtn} onClick={onExit}>✕</button>
@@ -291,37 +272,35 @@ function Stage({ peerId, stream, onExit }){
   );
 }
 
-/* ------------ quick inline styles --------------------------------- */
+/* ---------- inline styles (same as before) ------------------------ */
 const styles = {
-  wrapper :{ padding:16,fontFamily:'sans-serif',height:'100vh',
-             boxSizing:'border-box',display:'flex',flexDirection:'column' },
-  header  :{ display:'flex',gap:12,alignItems:'center',marginBottom:8 },
-  grid    :{ display:'grid', gap:8,
-             gridTemplateColumns:`repeat(auto-fill,minmax(${TILE_W}px,1fr))`,
-             flex:1, overflow:'auto' },
+  wrapper : { padding:16,height:'100vh',display:'flex',flexDirection:'column',
+              boxSizing:'border-box',fontFamily:'sans-serif' },
+  header  : { display:'flex',gap:12,alignItems:'center',marginBottom:8 },
+  grid    : { display:'grid',gap:8,
+              gridTemplateColumns:`repeat(auto-fill,minmax(${TILE_W}px,1fr))`,
+              flex:1,overflow:'auto' },
 
-  tile    :{ position:'relative', width:'100%', paddingTop:'56.25%',
-             background:'#000', borderRadius:8, overflow:'hidden' },
-  vid     :{ position:'absolute', top:0,left:0,width:'100%',height:'100%',
-             objectFit:'cover' },
-  label   :{ position:'absolute', bottom:4,left:6,fontSize:12,
-             color:'#fff',background:'#0008',padding:'2px 6px',borderRadius:4 },
-  fullBtn :{ position:'absolute', top:4,right:4,zIndex:2,
-             background:'#0006',color:'#fff',border:'none',borderRadius:4,
-             cursor:'pointer',padding:'0 6px' },
-  clickCatcher:{ position:'absolute', inset:0, cursor:'pointer' },
+  tile    : { position:'relative',width:'100%',paddingTop:'56.25%',
+              background:'#000',borderRadius:8,overflow:'hidden',cursor:'pointer' },
+  vid     : { position:'absolute',top:0,left:0,width:'100%',height:'100%',
+              objectFit:'cover' },
+  label   : { position:'absolute',bottom:4,left:6,fontSize:12,
+              color:'#fff',background:'#0008',padding:'2px 6px',borderRadius:4 },
+  fullBtn : { position:'absolute',top:4,right:4,zIndex:2,
+              background:'#0006',color:'#fff',border:'none',
+              borderRadius:4,padding:'0 6px' },
 
-  stage   :{ position:'relative', flex:1, background:'#000',
-             borderRadius:8, overflow:'hidden' },
-  stageVideo:{ width:'100%', height:'100%', objectFit:'contain' },
-  closeBtn:{ position:'absolute', top:10,right:10,fontSize:24,
-             background:'none', border:'none', color:'#fff', cursor:'pointer' },
+  stage   : { position:'relative',flex:1,background:'#000',
+              borderRadius:8,overflow:'hidden' },
+  stageVideo:{ width:'100%',height:'100%',objectFit:'contain' },
+  closeBtn:{ position:'absolute',top:10,right:10,fontSize:24,
+             background:'none',border:'none',color:'#fff',cursor:'pointer' },
 
-  /* screen share tile */
-  shareBox :{ position:'relative', width:'100%', paddingTop:'38%', marginBottom:8,
-              background:'#000', borderRadius:8, overflow:'hidden' },
-  shareVideo:{ position:'absolute', top:0,left:0,width:'100%',height:'100%',
+  shareBox : { position:'relative',width:'100%',paddingTop:'38%',marginBottom:8,
+               background:'#000',borderRadius:8,overflow:'hidden' },
+  shareVideo:{ position:'absolute',top:0,left:0,width:'100%',height:'100%',
                objectFit:'contain' },
-  shareLabel:{ position:'absolute', bottom:4,left:6,fontSize:12,
+  shareLabel:{ position:'absolute',bottom:4,left:6,fontSize:12,
                color:'#fff',background:'#0008',padding:'2px 6px',borderRadius:4 }
 };
