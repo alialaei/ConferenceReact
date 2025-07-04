@@ -64,7 +64,7 @@ export default function Room() {
     device.current = new mediasoupClient.Device();
     await device.current.load({ routerRtpCapabilities: rtpCaps });
 
-    const paramsSend = await new Promise(res => socket.emit('createTransport', res));
+    const paramsSend = await new Promise(res => socket.emit('createTransport', { consuming:false }, res));
     sendT.current = device.current.createSendTransport({
       ...paramsSend,
       iceServers: paramsSend.iceServers
@@ -76,7 +76,7 @@ export default function Room() {
       socket.emit('produce', { transportId: sendT.current.id, ...p }, ({ id }) => cb({ id })));
     await Promise.all(stream.getTracks().map(t => sendT.current.produce({ track: t })));
 
-    const paramsRecv = await new Promise(res => socket.emit('createTransport', res));
+    const paramsRecv = await new Promise(res => socket.emit('createTransport', { consuming:true },  res));
     recvT.current = device.current.createRecvTransport({
       ...paramsRecv,
       iceServers: paramsRecv.iceServers
