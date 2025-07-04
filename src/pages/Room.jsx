@@ -4,28 +4,31 @@ import io              from 'socket.io-client';
 import * as mediasoup  from 'mediasoup-client';
 
 const socket = io('https://webrtcserver.mmup.org', { transports:['websocket'] });
-
-const TILE_W = 320;              // base tile width (the grid will auto-wrap)
+const TILE_W = 320;               // base tile width for the grid
 
 export default function Room() {
   const { roomId } = useParams();
 
-  /* ---------- refs & state ---------------------------------------- */
-  const localRef  = useRef(null);
-  const device    = useRef(null);
-  const sendT     = useRef(null);
-  const recvT     = useRef(null);
-  const consumers = useRef(new Set());
-  const pending   = useRef([]);
-  const audioProd = useRef(null);
+  /* ------------- refs & state ------------------------------------- */
+  const localVideoRef   = useRef(null);
+  const device          = useRef(null);
+  const sendT           = useRef(null);
+  const recvT           = useRef(null);
+  const consumers       = useRef(new Set());
+  const pending         = useRef([]);
 
-  const [isOwner,      setIsOwner]      = useState(false);
-  const [approved,     setApproved]     = useState(false);
-  const [people,       setPeople]       = useState({});  // socketId → { stream }
-  const [micEnabled,   setMicEnabled]   = useState(true);
-  const [stagePeerId,  setStagePeerId]  = useState(null); // null = grid view
+  const audioProducer   = useRef(null);     // for mute/un-mute
+  const shareProducer   = useRef(null);     // our own screen share
 
-  /* ---------- join ------------------------------------------------- */
+  const [localStream, setLocalStream]   = useState(null);
+  const [isOwner,     setIsOwner]       = useState(false);
+  const [approved,    setApproved]      = useState(false);
+  const [people,      setPeople]        = useState({});   // socketId → { stream }
+  const [micOn,       setMicOn]         = useState(true);
+  const [stageId,     setStageId]       = useState(null); // null => grid
+  const [share,       setShare]         = useState(null); // { socketId, stream }
+
+  /* ------------- join --------------------------------------------- */
   useEffect(() => {
     socket.emit('join-room', { roomId }, (r = {}) => {
       setIsOwner(r.isOwner);
@@ -36,7 +39,7 @@ export default function Room() {
     });
   }, [roomId]);
 
-  /* ---------- listeners ------------------------------------------- */
+  /* ------------- listeners ---------------------------------------- */
   useEffect(() => {
     const approve = ({ socketId }) =>
       window.confirm(`Accept ${socketId}?`)
@@ -52,8 +55,10 @@ export default function Room() {
     socket.on('join-approved', joined);
     socket.on('newProducer',   handleProducer);
 
-    socket.on('participant-left', ({ socketId }) =>
-      setPeople(p => { const cp = { ...p }; delete cp[socketId]; return cp; }));
+    socket.on('participant-left', ({ socketId }) => {
+      setPeople(p => { const cp = { ...p }; delete cp[socketId]; return cp; });
+      if (share?.socketId === socketId) setShare(null);
+    });
 
     socket.on('join-denied', () => { alert('Join denied');  location.replace('/'); });
     socket.on('room-closed', () => { alert('Room closed');  location.replace('/'); });
@@ -62,21 +67,25 @@ export default function Room() {
                        .off('join-approved')
                        .off('newProducer')
                        .off('participant-left');
-  }, [isOwner]);
+  }, [isOwner, share]);
 
-  /* ---------- mediasoup bootstrap --------------------------------- */
+  /* ------------- mediasoup bootstrap ------------------------------ */
   async function initMedia() {
     if (sendT.current) return;
 
+    /* local cam & mic */
     const cam = await navigator.mediaDevices.getUserMedia({ video:true, audio:true });
-    localRef.current.srcObject = cam;
+    setLocalStream(cam);
 
-    /* — device — */
+    /* attach immediately */
+    if (localVideoRef.current) localVideoRef.current.srcObject = cam;
+
+    /* device */
     const caps = await new Promise(res => socket.emit('getRouterRtpCapabilities', res));
     device.current = new mediasoup.Device();
     await device.current.load({ routerRtpCapabilities:caps });
 
-    /* — send transport — */
+    /* SEND transport */
     const pSend = await new Promise(res => socket.emit('createTransport', { consuming:false }, res));
     sendT.current = device.current.createSendTransport({
       ...pSend, iceServers:pSend.iceServers, iceTransportPolicy:'relay'
@@ -87,20 +96,20 @@ export default function Room() {
         { transportId:sendT.current.id, dtlsParameters },
         ack => ack?.error ? bad(ack.error) : ok()));
 
-    sendT.current.on('produce', ({ kind, rtpParameters }, ok, bad) =>
+    sendT.current.on('produce', ({ kind, rtpParameters, appData }, ok, bad) =>
       socket.emit('produce',
-        { transportId:sendT.current.id, kind, rtpParameters },
+        { transportId:sendT.current.id, kind, rtpParameters, appData },
         ({ id, error }) => error ? bad(error) : ok({ id })));
 
-    /* publish tracks & keep audio producer */
+    /* publish cam+mic */
     await Promise.all(
-      cam.getTracks().map(async track => {
-        const prod = await sendT.current.produce({ track });
-        if (track.kind === 'audio') audioProd.current = prod;
+      cam.getTracks().map(async tr => {
+        const prod = await sendT.current.produce({ track:tr });
+        if (tr.kind === 'audio') audioProducer.current = prod;
       })
     );
 
-    /* — recv transport — */
+    /* RECV transport */
     const pRecv = await new Promise(res => socket.emit('createTransport', { consuming:true }, res));
     recvT.current = device.current.createRecvTransport({
       ...pRecv, iceServers:pRecv.iceServers, iceTransportPolicy:'relay'
@@ -111,10 +120,11 @@ export default function Room() {
         { transportId:recvT.current.id, dtlsParameters },
         ack => ack?.error ? bad(ack.error) : ok()));
 
+    /* flush queued producers */
     while (pending.current.length) consumeProducer(pending.current.shift());
   }
 
-  /* ---------- producer helpers ------------------------------------ */
+  /* ------------- producer helpers --------------------------------- */
   function handleProducer(info){
     if (!recvT.current){ pending.current.push(info); return; }
     consumeProducer(info);
@@ -124,81 +134,152 @@ export default function Room() {
     if (consumers.current.has(producerId)) return;
     consumers.current.add(producerId);
 
-    socket.emit('consume',
+    socket.emit(
+      'consume',
       { producerId, rtpCapabilities:device.current.rtpCapabilities },
       async ({ id, kind, rtpParameters, error }) => {
         if (error) return console.error(error);
         const cons = await recvT.current.consume({ id, producerId, kind, rtpParameters });
         await cons.resume();
 
+        // detect screen share by label (Chrome/Firefox) or by contentHint
+        const isScreen =
+          kind === 'video' &&
+          (cons.track.label.toLowerCase().includes('screen') ||
+           cons.track.label.toLowerCase().includes('share'));
+
         setPeople(p => {
           const stream = p[socketId]?.stream ?? new MediaStream();
           stream.addTrack(cons.track);
           return { ...p, [socketId]:{ stream } };
         });
+
+        if (isScreen) setShare({ socketId, stream:new MediaStream([cons.track]) });
       });
   }
 
-  /* ---------- UI helpers ------------------------------------------ */
+  /* ------------- controls ----------------------------------------- */
   const toggleMic = () => {
-    const p = audioProd.current; if (!p) return;
+    const p = audioProducer.current; if (!p) return;
     p.paused ? p.resume() : p.pause();
-    setMicEnabled(!p.paused);
+    setMicOn(!p.paused);
   };
 
-  const allTiles = Object.entries({ you:'local', ...people });
+  const startShare = async () => {
+    if (share) return;                               // someone already sharing
+    try{
+      const disp = await navigator.mediaDevices.getDisplayMedia({ video:true, audio:false });
+      const track = disp.getVideoTracks()[0];
 
-  /* ---------- render ---------------------------------------------- */
+      /* close when the user stops from browser UI */
+      track.onended = stopShare;
+
+      shareProducer.current = await sendT.current.produce({
+        track, appData:{ screen:true }
+      });
+
+      setShare({ socketId:'you', stream:new MediaStream([track]) });
+    }catch(e){ console.warn(e); }
+  };
+
+  const stopShare = async () => {
+    if (!shareProducer.current) return;
+    shareProducer.current.close();                   // informs the SFU
+    shareProducer.current = null;
+    setShare(null);
+  };
+
+  /* ------------- rendering helpers -------------------------------- */
+  const fullButton = (onClick) => (
+    <button onClick={onClick} style={styles.fullBtn}>⤢</button>
+  );
+
+  /* ------------- JSX ---------------------------------------------- */
   return (
     <div style={styles.wrapper}>
+      {/* top bar --------------------------------------------------- */}
       <header style={styles.header}>
         <h3>Room {roomId}</h3>
+
         <button onClick={toggleMic}>
-          {micEnabled ? 'Mute mic ⏸' : 'Un-mute mic 🔊'}
+          {micOn ? 'Mute mic ⏸' : 'Un-mute 🔊'}
         </button>
+
+        {share
+          ? (share.socketId === 'you'
+               ? <button onClick={stopShare}>Stop share 🛑</button>
+               : <button disabled>Screen in progress…</button>)
+          : <button onClick={startShare}>Share screen 🖥️</button>}
       </header>
 
-      {stagePeerId ? (
+      {/* stage OR grid ------------------------------------------- */}
+      {stageId ? (
         <Stage
-          peerId={stagePeerId === 'you' ? 'you' : stagePeerId}
-          stream={stagePeerId === 'you'
-                    ? localRef.current?.srcObject
-                    : people[stagePeerId]?.stream}
-          onExit={()=>setStagePeerId(null)}
+          peerId={stageId}
+          stream={stageId==='you' ? localStream : people[stageId]?.stream}
+          onExit={()=>setStageId(null)}
         />
       ) : (
-        <div style={styles.grid}>
-          {/* local first */}
-          <Tile
-            key="you" peerId="you" refEl={localRef}
-            onClick={()=>setStagePeerId('you')}
-          />
+        <>
+          {/* screen share (if any) */}
+          {share && (
+            <div style={styles.shareBox}>
+              <video autoPlay playsInline
+                     muted={share.socketId==='you'}
+                     ref={el => el && (el.srcObject = share.stream)}
+                     style={styles.shareVideo}/>
+              <span style={styles.shareLabel}>
+                {share.socketId==='you' ? 'Your screen' : `${share.socketId}'s screen`}
+              </span>
+            </div>
+          )}
 
-          {Object.entries(people).map(([id, { stream }]) => (
-            <Tile key={id} peerId={id} stream={stream}
-                  onClick={()=>setStagePeerId(id)} />
-          ))}
-        </div>
+          {/* grid of cameras */}
+          <div style={styles.grid}>
+            {/* local (you) */}
+            <Tile
+              peerId="you"
+              stream={localStream}
+              refEl={localVideoRef}
+              onStage={()=>setStageId('you')}
+              fullBtn={fullButton(()=>setStageId('you'))}
+            />
+
+            {Object.entries(people).map(([id, { stream }]) => (
+              <Tile key={id}
+                    peerId={id}
+                    stream={stream}
+                    onStage={()=>setStageId(id)}
+                    fullBtn={fullButton(()=>setStageId(id))}/>
+            ))}
+          </div>
+        </>
       )}
     </div>
   );
 }
 
-/* ---------- Tile --------------------------------------------------- */
-function Tile({ peerId, stream, refEl, onClick }){
+/* ------------ Tile component -------------------------------------- */
+function Tile({ peerId, stream, refEl, onStage, fullBtn }){
   return (
-    <div style={{ ...styles.tile, cursor:'pointer' }} onClick={onClick}>
+    <div style={styles.tile}>
       <video
-        ref={el => { if (refEl) refEl.current = el; if (el && stream) el.srcObject = stream; }}
+        ref={el => {
+          if (refEl) refEl.current = el;
+          if (el && stream) el.srcObject = stream;
+        }}
         autoPlay playsInline muted={peerId==='you'}
         style={styles.vid}
       />
       <span style={styles.label}>{peerId==='you' ? 'You' : peerId}</span>
+      {fullBtn /* top-right expand button */}
+      {/* click anywhere also toggles stage */}
+      <div style={styles.clickCatcher} onClick={onStage}/>
     </div>
   );
 }
 
-/* ---------- Stage (full-width) ------------------------------------ */
+/* ------------ Stage (full-width) ---------------------------------- */
 function Stage({ peerId, stream, onExit }){
   return (
     <div style={styles.stage}>
@@ -210,22 +291,37 @@ function Stage({ peerId, stream, onExit }){
   );
 }
 
-/* ---------- quick inline styles ----------------------------------- */
+/* ------------ quick inline styles --------------------------------- */
 const styles = {
-  wrapper:{ padding:16,fontFamily:'sans-serif',height:'100vh',boxSizing:'border-box' },
-  header :{ display:'flex',gap:12,alignItems:'center',marginBottom:8 },
-  grid   :{ display:'grid', gap:8,
-            gridTemplateColumns:`repeat(auto-fill,minmax(${TILE_W}px,1fr))` },
-  tile   :{ position:'relative', width:'100%', paddingTop:'56.25%',  /* 16:9 */
-            background:'#000', overflow:'hidden', borderRadius:8 },
-  vid    :{ position:'absolute', top:0,left:0,width:'100%',height:'100%',
-            objectFit:'cover' },
-  label  :{ position:'absolute', bottom:4,left:6,
-            color:'#fff',background:'#0008',padding:'2px 6px',fontSize:12,
-            borderRadius:4 },
-  stage  :{ position:'relative', width:'100%', height:'calc(100vh - 70px)',
-            background:'#000', borderRadius:8, overflow:'hidden' },
+  wrapper :{ padding:16,fontFamily:'sans-serif',height:'100vh',
+             boxSizing:'border-box',display:'flex',flexDirection:'column' },
+  header  :{ display:'flex',gap:12,alignItems:'center',marginBottom:8 },
+  grid    :{ display:'grid', gap:8,
+             gridTemplateColumns:`repeat(auto-fill,minmax(${TILE_W}px,1fr))`,
+             flex:1, overflow:'auto' },
+
+  tile    :{ position:'relative', width:'100%', paddingTop:'56.25%',
+             background:'#000', borderRadius:8, overflow:'hidden' },
+  vid     :{ position:'absolute', top:0,left:0,width:'100%',height:'100%',
+             objectFit:'cover' },
+  label   :{ position:'absolute', bottom:4,left:6,fontSize:12,
+             color:'#fff',background:'#0008',padding:'2px 6px',borderRadius:4 },
+  fullBtn :{ position:'absolute', top:4,right:4,zIndex:2,
+             background:'#0006',color:'#fff',border:'none',borderRadius:4,
+             cursor:'pointer',padding:'0 6px' },
+  clickCatcher:{ position:'absolute', inset:0, cursor:'pointer' },
+
+  stage   :{ position:'relative', flex:1, background:'#000',
+             borderRadius:8, overflow:'hidden' },
   stageVideo:{ width:'100%', height:'100%', objectFit:'contain' },
   closeBtn:{ position:'absolute', top:10,right:10,fontSize:24,
-             background:'none', border:'none', color:'#fff', cursor:'pointer' }
+             background:'none', border:'none', color:'#fff', cursor:'pointer' },
+
+  /* screen share tile */
+  shareBox :{ position:'relative', width:'100%', paddingTop:'38%', marginBottom:8,
+              background:'#000', borderRadius:8, overflow:'hidden' },
+  shareVideo:{ position:'absolute', top:0,left:0,width:'100%',height:'100%',
+               objectFit:'contain' },
+  shareLabel:{ position:'absolute', bottom:4,left:6,fontSize:12,
+               color:'#fff',background:'#0008',padding:'2px 6px',borderRadius:4 }
 };
