@@ -110,6 +110,8 @@ export default function Room() {
       { producerId, rtpCapabilities: device.current.rtpCapabilities },
       async ({ id, kind, rtpParameters }) => {
         const consumer = await recvT.current.consume({ id, producerId, kind, rtpParameters });
+        // 🔑 start actually receiving media
+        await consumer.resume();
         setPeople(p => {
           const stream = p[socketId]?.stream ?? new MediaStream();
           stream.addTrack(consumer.track);
