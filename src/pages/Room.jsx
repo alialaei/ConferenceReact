@@ -3,23 +3,21 @@ import { useParams } from 'react-router-dom';
 import io from 'socket.io-client';
 import * as mediasoupClient from 'mediasoup-client';
 
-const socket = io('https://webrtcserver.mmup.org', { transports: ['websocket'] });
+const socket = io('https://webrtcserver.mmup.org', { transports:['websocket'] });
 
 export default function Room() {
   const { roomId } = useParams();
 
   const localRef = useRef(null);
-
   const [isOwner,  setIsOwner]  = useState(false);
   const [approved, setApproved] = useState(false);
-  const [people,   setPeople]   = useState({});          // socketId → { stream }
+  const [people,   setPeople]   = useState({});        // socketId → { stream }
 
   const consumers = useRef(new Set());
-  const pending   = useRef([]);                          // producers queued before recvT ready
-
-  const device = useRef(null);
-  const sendT  = useRef(null);
-  const recvT  = useRef(null);
+  const pending   = useRef([]);                         // producers queued before recvT
+  const device    = useRef(null);
+  const sendT     = useRef(null);
+  const recvT     = useRef(null);
 
   /* ---------- join -------------------------------------------------- */
   useEffect(() => {
@@ -34,7 +32,6 @@ export default function Room() {
 
   /* ---------- socket listeners ------------------------------------- */
   useEffect(() => {
-
     const approve = ({ socketId }) =>
       window.confirm(`Accept ${socketId}?`)
         ? socket.emit('approve-join', { targetSocketId: socketId })
@@ -49,12 +46,8 @@ export default function Room() {
     socket.on('join-approved', joined);
     socket.on('newProducer',   handleProducer);
 
-    socket.on('join-denied', () => {
-      alert('Join denied');  location.replace('/');
-    });
-    socket.on('room-closed', () => {
-      alert('Room closed by owner');  location.replace('/');
-    });
+    socket.on('join-denied', () => { alert('Join denied');  location.replace('/'); });
+    socket.on('room-closed', () => { alert('Room closed');  location.replace('/'); });
 
     return () => socket.off('join-request')
                        .off('join-approved')
@@ -63,7 +56,7 @@ export default function Room() {
 
   /* ---------- mediasoup bootstrap ---------------------------------- */
   async function initMedia() {
-    if (sendT.current) return;                       // already initialised
+    if (sendT.current) return;                          // already initialised
 
     /* local camera */
     const stream = await navigator.mediaDevices.getUserMedia({ video:true, audio:true });
@@ -84,29 +77,29 @@ export default function Room() {
       iceTransportPolicy: 'relay'
     });
 
-    sendT.current.on('connect', (dtlsParams, done) => {
-      socket.emit(
-        'connectTransport',
-        { transportId: sendT.current.id, dtlsParameters: dtlsParams },
-        (ack) => {
-          if (ack?.error) {
-            console.error('SEND connect failed:', ack.error);
-            return done(ack.error);
-          }
-          done();                                   // ✅ mediasoup happy
-        }
-      );
-    });
+    sendT.current.on(
+      'connect',
+      async ({ dtlsParameters }, callback, errback) => {
+        socket.emit(
+          'connectTransport',
+          { transportId: sendT.current.id, dtlsParameters },
+          (ack) => ack?.error ? errback(ack.error) : callback()
+        );
+      }
+    );
 
-    sendT.current.on('produce', (p, done) => {
-      socket.emit(
-        'produce',
-        { transportId: sendT.current.id, ...p },
-        ({ id, error }) => (error ? done(error) : done({ id }))
-      );
-    });
+    sendT.current.on(
+      'produce',
+      ({ kind, rtpParameters }, callback, errback) => {
+        socket.emit(
+          'produce',
+          { transportId: sendT.current.id, kind, rtpParameters },
+          ({ id, error }) => error ? errback(error) : callback({ id })
+        );
+      }
+    );
 
-    /* publish both tracks */
+    /* publish audio & video */
     await Promise.all(stream.getTracks().map(t => sendT.current.produce({ track:t })));
 
     /* ---------- RECV transport ------------------------------------ */
@@ -118,34 +111,28 @@ export default function Room() {
       iceTransportPolicy: 'relay'
     });
 
-    recvT.current.on('connect', (dtlsParams, done) => {
-      socket.emit(
-        'connectTransport',
-        { transportId: recvT.current.id, dtlsParameters: dtlsParams },
-        (ack) => {
-          if (ack?.error) {
-            console.error('RECV connect failed:', ack.error);
-            return done(ack.error);
-          }
-          done();
-        }
-      );
-    });
+    recvT.current.on(
+      'connect',
+      ({ dtlsParameters }, callback, errback) => {
+        socket.emit(
+          'connectTransport',
+          { transportId: recvT.current.id, dtlsParameters },
+          (ack) => ack?.error ? errback(ack.error) : callback()
+        );
+      }
+    );
 
-    /* consume any producers announced before recvT became ready */
+    /* consume anything queued while recvT was not ready */
     while (pending.current.length) consumeProducer(pending.current.shift());
   }
 
   /* ---------- producer helper ------------------------------------- */
   function handleProducer(info) {
-    if (!recvT.current) {               // queue until we have a recv transport
-      pending.current.push(info);
-      return;
-    }
+    if (!recvT.current) { pending.current.push(info); return; }
     consumeProducer(info);
   }
 
-  async function consumeProducer({ producerId, socketId }) {
+  function consumeProducer({ producerId, socketId }) {
     if (consumers.current.has(producerId)) return;
     consumers.current.add(producerId);
 
@@ -170,7 +157,6 @@ export default function Room() {
   return (
     <div style={{ padding:32 }}>
       <h2>Room {roomId}</h2>
-
       {isOwner  && !approved && <p>Waiting for guests…</p>}
       {!isOwner && !approved && <p>Waiting for owner approval…</p>}
 
