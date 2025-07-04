@@ -12,6 +12,7 @@ export default function Room() {
   const [isOwner,  setIsOwner]  = useState(false);
   const [approved, setApproved] = useState(false);
   const [people,   setPeople]   = useState({});        // socketId → { stream }
+  const [micEnabled, setMicEnabled] = useState(true);
 
   const consumers = useRef(new Set());
   const pending   = useRef([]);                         // producers queued before recvT
@@ -45,13 +46,22 @@ export default function Room() {
     socket.on('join-request',  ({ socketId }) => isOwner && approve({ socketId }));
     socket.on('join-approved', joined);
     socket.on('newProducer',   handleProducer);
+    // someone left ➜ drop their video
+    socket.on('participant-left', ({ socketId }) => {
+      setPeople(p => {
+        const cpy = { ...p };
+        delete cpy[socketId];
+        return cpy;
+      });
+    });
 
     socket.on('join-denied', () => { alert('Join denied');  location.replace('/'); });
     socket.on('room-closed', () => { alert('Room closed');  location.replace('/'); });
 
     return () => socket.off('join-request')
                        .off('join-approved')
-                       .off('newProducer');
+                       .off('newProducer')
+                       .off('participant-left');
   }, [isOwner]);
 
   /* ---------- mediasoup bootstrap ---------------------------------- */
@@ -163,6 +173,17 @@ export default function Room() {
       <video ref={localRef}
              autoPlay playsInline muted width={320}
              style={{ background:'#000' }} />
+      
+      <div style={{ margin:'8px 0' }}>
+        <button onClick={() => {
+          const track = localRef.current?._micTrack;
+          if (!track) return;
+          track.enabled = !track.enabled;
+          setMicEnabled(track.enabled);
+        }}>
+          {micEnabled ? 'Mute mic' : 'Un-mute mic'}
+        </button>
+      </div>
 
       {Object.entries(people).map(([id, { stream }]) => (
         <video key={id} autoPlay playsInline width={320}
