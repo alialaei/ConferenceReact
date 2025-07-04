@@ -11,33 +11,25 @@ export default function Room() {
 
   const [isOwner,  setIsOwner]  = useState(false);
   const [approved, setApproved] = useState(false);
-  const [people,   setPeople]   = useState({});     // socketId → { stream }
+  const [people,   setPeople]   = useState({});
 
   const consumers = useRef(new Set());
+  const pending   = useRef([]);             //  ← NEW
   const device    = useRef(null);
   const sendT     = useRef(null);
   const recvT     = useRef(null);
 
-  /* ---------- first contact: join the room -------------------------- */
+  /* --- join --------------------------------------------------------- */
   useEffect(() => {
-    socket.emit('join-room', { roomId }, (res = {}) => {
-      setIsOwner(res.isOwner);
-
-      // OWNER → start media immediately
-      if (res.isOwner) {
-        setApproved(true);
-        initMedia();
-      }
-
-      // GUEST with open room (no approval needed)
-      if (res.waitForApproval === false) {
-        setApproved(true);
-        initMedia();
+    socket.emit('join-room', { roomId }, (r = {}) => {
+      setIsOwner(r.isOwner);
+      if (r.isOwner || r.waitForApproval === false) {
+        setApproved(true); initMedia();
       }
     });
   }, [roomId]);
 
-  /* ---------- socket listeners ------------------------------------- */
+  /* --- listeners ---------------------------------------------------- */
   useEffect(() => {
     const approve = ({ socketId }) =>
       window.confirm(`Accept ${socketId}?`)
@@ -61,57 +53,61 @@ export default function Room() {
                        .off('newProducer');
   }, [isOwner]);
 
-  /* ---------- mediasoup bootstrap ---------------------------------- */
+  /* --- mediasoup bootstrap ----------------------------------------- */
   async function initMedia() {
-    if (sendT.current) return; // already initialised
+    if (sendT.current) return;
 
     const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
     localRef.current.srcObject = stream;
 
-    /* 1. load router caps ------------------------------------------ */
     const rtpCaps = await new Promise(res => socket.emit('getRouterRtpCapabilities', res));
     device.current = new mediasoupClient.Device();
     await device.current.load({ routerRtpCapabilities: rtpCaps });
 
-    /* 2. SEND transport ------------------------------------------- */
     const paramsSend = await new Promise(res => socket.emit('createTransport', res));
     sendT.current = device.current.createSendTransport({
       ...paramsSend,
-      iceServers        : paramsSend.iceServers,
-      iceTransportPolicy: 'relay'                // force TURN
+      iceServers: paramsSend.iceServers
     });
 
     sendT.current.on('connect', (d, cb) =>
       socket.emit('connectTransport', { transportId: sendT.current.id, dtlsParameters: d }, cb));
-
     sendT.current.on('produce', (p, cb) =>
       socket.emit('produce', { transportId: sendT.current.id, ...p }, ({ id }) => cb({ id })));
-
     await Promise.all(stream.getTracks().map(t => sendT.current.produce({ track: t })));
 
-    /* 3. RECV transport ------------------------------------------- */
     const paramsRecv = await new Promise(res => socket.emit('createTransport', res));
     recvT.current = device.current.createRecvTransport({
       ...paramsRecv,
-      iceServers        : paramsRecv.iceServers,
-      iceTransportPolicy: 'relay'                // force TURN
+      iceServers: paramsRecv.iceServers
     });
 
     recvT.current.on('connect', (d, cb) =>
       socket.emit('connectTransport', { transportId: recvT.current.id, dtlsParameters: d }, cb));
+
+    /* consume anything queued while recvT was not ready */
+    while (pending.current.length) consumeProducer(pending.current.shift());
   }
 
-  /* ---------- consume helper -------------------------------------- */
-  function handleProducer({ producerId, socketId }) {
-    if (consumers.current.has(producerId) || !recvT.current) return;
+  /* --- producer handler -------------------------------------------- */
+  function handleProducer(info) {
+    if (!recvT.current) {                   // queue until transport ready
+      pending.current.push(info);
+      return;
+    }
+    consumeProducer(info);
+  }
+
+  function consumeProducer({ producerId, socketId }) {
+    if (consumers.current.has(producerId)) return;
     consumers.current.add(producerId);
 
     socket.emit('consume',
       { producerId, rtpCapabilities: device.current.rtpCapabilities },
       async ({ id, kind, rtpParameters }) => {
         const consumer = await recvT.current.consume({ id, producerId, kind, rtpParameters });
-        // 🔑 start actually receiving media
         await consumer.resume();
+
         setPeople(p => {
           const stream = p[socketId]?.stream ?? new MediaStream();
           stream.addTrack(consumer.track);
@@ -120,7 +116,7 @@ export default function Room() {
       });
   }
 
-  /* ---------- UI --------------------------------------------------- */
+  /* --- UI ----------------------------------------------------------- */
   return (
     <div style={{ padding: 32 }}>
       <h2>Room {roomId}</h2>
