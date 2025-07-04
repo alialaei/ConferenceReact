@@ -121,12 +121,14 @@ export default function Room() {
   }
 
   /* ---------- consume helpers ------------------------------------- */
+
   function handleProducer(info) {
     if (!recvT.current) { pending.current.push(info); return; }
     consumeProducer(info);
   }
 
-  function consumeProducer({ producerId, socketId }) {
+  function consumeProducer(info) {
+    const { producerId, socketId, mediaTag } = info;
     if (consumers.current.has(producerId)) return;
     consumers.current.add(producerId);
 
@@ -139,7 +141,7 @@ export default function Room() {
         await cons.resume();
 
         /* 🔧 detect screen track ---------------------------------- */
-        const isScreen = info.mediaTag === 'screen';
+        const isScreen = mediaTag === 'screen';
 
         /* clean-up when producer / track ends 🔧 ------------------ */
         const removeShareIfMe = () =>
