@@ -100,8 +100,9 @@ export default function Room() {
 
     await Promise.all(
       cam.getTracks().map(async t => {
-        const p = await sendT.current.produce({ track: t });
-        if (t.kind === 'audio') audioProducer.current = p;
+        const tag = t.kind === 'video' ? 'cam' : 'mic';
+        const p = await sendT.current.produce({ track: t, appData:{ mediaTag: tag } });
+        if (tag === 'mic') audioProducer.current = p;
       })
     );
 
@@ -138,11 +139,7 @@ export default function Room() {
         await cons.resume();
 
         /* 🔧 detect screen track ---------------------------------- */
-        const isScreen =
-          kind === 'video' &&
-          (cons.track.contentHint === 'screen' ||
-           cons.track.label.toLowerCase().includes('screen') ||
-           cons.track.label.toLowerCase().includes('share'));
+        const isScreen = info.mediaTag === 'screen';
 
         /* clean-up when producer / track ends 🔧 ------------------ */
         const removeShareIfMe = () =>
@@ -180,7 +177,7 @@ export default function Room() {
       track.onended = stopShare;
 
       shareProducer.current = await sendT.current.produce({
-        track, appData: { screen: true }
+        track, appData:{ mediaTag:'screen' }
       });
       setShare({ socketId: 'you', stream: new MediaStream([track]) });
     } catch (e) { /* user cancelled */ }
