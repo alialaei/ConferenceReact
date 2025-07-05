@@ -53,6 +53,7 @@ export default function Room() {
     };
 
     socket.on('join-request',  ({ socketId }) => isOwner && approve({ socketId }));
+    socket.on('screen-stopped', () => setShare(null));
     socket.on('join-approved', joined);
     socket.on('newProducer',   handleProducer);
 
@@ -187,9 +188,16 @@ export default function Room() {
 
   const stopShare = () => {
     if (!shareProducer.current) return;
+
+    // 1️⃣ close local producer → remote mediasoup consumers get “producerclose”
     shareProducer.current.close();
     shareProducer.current = null;
+
+    // 2️⃣ update your own UI immediately
     setShare(null);
+
+    // 3️⃣ tell everyone else (extra safety in case “producerclose” is missed)
+    socket.emit('stop-screen');
   };
 
   /* ---------- UI --------------------------------------------------- */
