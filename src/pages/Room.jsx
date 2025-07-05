@@ -1,10 +1,52 @@
-import { useEffect, useState, useRef } from 'react';
+import { useEffect, useState, useRef, useCallback } from 'react';
 import { useParams } from 'react-router-dom';
 import io from 'socket.io-client';
 import * as mediasoup from 'mediasoup-client';
+import CodeMirror from '@uiw/react-codemirror';
+import '@uiw/react-codemirror/dist/codemirror.css';
+import CodeMirror from '@uiw/react-codemirror';
+import { javascript } from '@codemirror/lang-javascript';
 
 const socket  = io('https://webrtcserver.mmup.org', { transports:['websocket'] });
 const TILE_W  = 320;
+
+function CodePad({ roomId, editable }) {
+  const [code, setCode] = useState('');
+
+  /* ① ask the server for the latest text once */
+  useEffect(() => {
+    socket.emit('code-get', { roomId }, (text) => setCode(text));
+  }, [roomId]);
+
+  /* ② live updates from *other* peers */
+  useEffect(() => {
+    const h = ({ text }) => setCode(text);
+    socket.on('code-update', h);
+    return () => socket.off('code-update', h);
+  }, []);
+
+  /* ③ local edits → broadcast */
+  const onChange = useCallback(
+    (val) => {
+      setCode(val);
+      socket.emit('code-set', { roomId, text: val });
+    },
+    [roomId]
+  );
+
+  return (
+    <div style={styles.codeBox}>
+      <CodeMirror
+        value={code}
+        height="100%"
+        theme="dark"
+        extensions={[javascript()]}
+        readOnly={!editable}
+        onChange={editable ? onChange : undefined}
+      />
+    </div>
+  );
+}
 
 /* ──────────────────────────────────────────────────────────────────── */
 /*  Room                                                               */
@@ -264,6 +306,7 @@ export default function Room() {
                     onStage={() => setStageId(id)} />
             ))}
           </div>
+          <CodePad roomId={roomId} editable={isOwner /* change as you like */} />
         </>
       )}
     </div>
@@ -333,5 +376,7 @@ const styles = {
   shareVideo:{ position:'absolute',top:0,left:0,width:'100%',height:'100%',
                objectFit:'contain' },
   shareLabel:{ position:'absolute',bottom:4,left:6,fontSize:12,
-               color:'#fff',background:'#0008',padding:'2px 6px',borderRadius:4 }
+               color:'#fff',background:'#0008',padding:'2px 6px',borderRadius:4 },
+  codeBox : { height:'200px', marginTop:8, borderRadius:8,
+              overflow:'hidden', background:'#1e1e1e' }
 };
