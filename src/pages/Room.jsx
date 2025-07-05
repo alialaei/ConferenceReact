@@ -1,123 +1,491 @@
-// Room.jsx
-import { useEffect, useState, useRef } from 'react';
+import { useEffect, useState, useRef, useCallback } from 'react';
 import { useParams } from 'react-router-dom';
 import io from 'socket.io-client';
-import * as mediasoupClient from 'mediasoup-client';
+import * as mediasoup from 'mediasoup-client';
 
-const socket = io('https://webrtcserver.mmup.org', { transports: ['websocket'] });
+import CodeMirror from '@uiw/react-codemirror';
+import { javascript } from '@codemirror/lang-javascript';
+import { useDropzone }                 from 'react-dropzone';
+import { pdfjs, Document, Page }       from 'react-pdf';
+import 'react-pdf/dist/Page/TextLayer.css';
+import 'react-pdf/dist/Page/AnnotationLayer.css';
+pdfjs.GlobalWorkerOptions.workerSrc =
+  `//cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjs.version}/pdf.worker.min.js`;
 
+const socket  = io('https://webrtcserver.mmup.org', { transports:['websocket'] });
+const TILE_W  = 320;
+
+/* ---------- tiny chat bubble ------------------------------------ */
+function ChatBox({ roomId, nick }){
+  const [messages,setMsgs] = useState([]);
+  const [text,setText]     = useState('');
+
+  useEffect(()=>{
+    const h = m => setMsgs(v => [...v, m]);
+    socket.on('chat-recv', h);
+    return ()=>socket.off('chat-recv', h);
+  },[]);
+
+  const send = () => {
+    if(!text.trim()) return;
+    socket.emit('chat-send', { roomId, text, from:nick });
+    setMsgs(v => [...v, { text, from:'me' }]);
+    setText('');
+  };
+
+  return (
+    <div style={styles.chatWrap}>
+      <div style={styles.chatLog}>
+        {messages.map((m,i)=>(
+          <div key={i} style={{margin:'4px 0'}}>
+            <b>{m.from==='me'?nick:m.from}:</b> {m.text}
+          </div>
+        ))}
+      </div>
+      <div>
+        <input style={styles.chatInput}
+               value={text} onChange={e=>setText(e.target.value)}
+               onKeyDown={e=>e.key==='Enter'&&send()} />
+        <button onClick={send}>➤</button>
+      </div>
+    </div>
+  );
+}
+
+
+function CodePad({ roomId, editable }) {
+  const [code, setCode] = useState('');
+
+  /* ① ask the server for the latest text once */
+  useEffect(() => {
+    socket.emit('code-get', { roomId }, (text) => setCode(text));
+  }, [roomId]);
+
+  /* ② live updates from *other* peers */
+  useEffect(() => {
+    const h = ({ text }) => setCode(text);
+    socket.on('code-update', h);
+    return () => socket.off('code-update', h);
+  }, []);
+
+  /* ③ local edits → broadcast */
+  const onChange = useCallback(
+    (val) => {
+      setCode(val);
+      socket.emit('code-set', { roomId, text: val });
+    },
+    [roomId]
+  );
+
+  return (
+    <div style={styles.codeBox}>
+      <CodeMirror
+        value={code}
+        height="100%"
+        theme="dark"
+        extensions={[javascript()]}
+        readOnly={!editable}
+        onChange={editable ? onChange : undefined}
+      />
+    </div>
+  );
+}
+
+/* ──────────────────────────────────────────────────────────────────── */
+/*  Room                                                               */
+/* ──────────────────────────────────────────────────────────────────── */
 export default function Room() {
   const { roomId } = useParams();
-  const localRef   = useRef(null);
+  const nick       = 'Nick';
 
-  const [isOwner,   setIsOwner]   = useState(false);
-  const [approved,  setApproved]  = useState(false);
-  const [people,    setPeople]    = useState({});        // socketId -> {stream}
-  const consumers   = useRef(new Set());
+  /* ----- refs + state -------------------------------------------- */
+  const localVideoRef = useRef(null);
+  const device        = useRef(null);
+  const sendT         = useRef(null);
+  const recvT         = useRef(null);
+  const pending       = useRef([]);
+  const consumers     = useRef(new Set());
 
-  const device      = useRef(null);
-  const sendT       = useRef(null);
-  const recvT       = useRef(null);
+  const audioProducer = useRef(null);
+  const shareProducer = useRef(null);
 
-  /* ---------- one-time join ------------------------------------------- */
+  const [localStream, setLocalStream] = useState(null);
+  const [people,      setPeople]      = useState({});      // socketId → { stream }
+  const [share,       setShare]       = useState(null);    // null | "pending" | { socketId, stream }
+
+  const [isOwner,  setIsOwner]  = useState(false);
+  const [approved, setApproved] = useState(false);
+  const [micOn,    setMicOn]    = useState(true);
+  const [stageId,  setStageId]  = useState(null);
+
+  const [pdfDoc,setPdf]=useState(null);      // {url,name}
+  const [pdfFull,setPdfFull]=useState(false);
+
+  /* owner-only dropzone */
+  const onDrop = useCallback(async files=>{
+    const fd = new FormData();
+    fd.append('file', files[0]);
+    const res = await fetch('/upload/pdf',{method:'POST',body:fd});
+    const {url,name} = await res.json();
+    socket.emit('pdf-share', { roomId, url, name });
+    setPdf({url,name});
+    setPdfFull(false);
+  },[roomId]);
+
+  const {getRootProps,getInputProps,isDragActive} =
+    useDropzone({ onDrop, accept:{'application/pdf':[]}, maxFiles:1, disabled:!isOwner });
+
+  useEffect(()=>{
+    socket.on('pdf-recv', ({url,name})=>{ setPdf({url,name}); setPdfFull(false);} );
+    return ()=>socket.off('pdf-recv');
+  },[]);
+
+  /* ----- join ----------------------------------------------------- */
   useEffect(() => {
-    socket.emit('join-room', { roomId }, ({ isOwner }) => {
-      setIsOwner(isOwner);
-      if (isOwner) setApproved(true);     // owner auto-approved
+    socket.emit('join-room', { roomId }, (r = {}) => {
+      setIsOwner(r.isOwner);
+      if (r.isOwner || r.waitForApproval === false) {
+        setApproved(true);
+        initMedia();
+      }
     });
   }, [roomId]);
 
-  /* ---------- socket listeners ---------------------------------------- */
+  /* ----- socket listeners ---------------------------------------- */
   useEffect(() => {
-    const onJoinReq  = ({ socketId }) => isOwner &&
+    const approve = ({ socketId }) =>
       window.confirm(`Accept ${socketId}?`)
         ? socket.emit('approve-join', { targetSocketId: socketId })
         : socket.emit('deny-join',    { targetSocketId: socketId });
 
-    const onJoinOk   = ({ existingProducers }) => {
+    const joined = ({ existingProducers }) => {
       setApproved(true);
-      initMedia().then(() => existingProducers.forEach(p => handleProducer(p)));
+      initMedia().then(() => existingProducers.forEach(handleProducer));
     };
 
-    const onNewProd  = handleProducer;
-    const onDenied   = () => alert('Join denied') || window.location.replace('/');
-    const onClosed   = () => alert('Room closed') || window.location.replace('/');
+    socket.on('join-request',  ({ socketId }) => isOwner && approve({ socketId }));
+    socket.on('join-approved', joined);
+    socket.on('newProducer',   handleProducer);
+    socket.on('screen-stopped',() => setShare(null));
 
-    socket
-      .on('join-request',  onJoinReq)
-      .on('join-approved', onJoinOk)
-      .on('newProducer',   onNewProd)
-      .on('join-denied',   onDenied)
-      .on('room-closed',   onClosed);
+    socket.on('participant-left', ({ socketId }) => {
+      setPeople(p => { const c = { ...p }; delete c[socketId]; return c; });
+      if (share && share.socketId === socketId) setShare(null);
+    });
 
-    return () => socket.off('join-request',  onJoinReq)
-                       .off('join-approved', onJoinOk)
-                       .off('newProducer',   onNewProd)
-                       .off('join-denied',   onDenied)
-                       .off('room-closed',   onClosed);
-  }, [isOwner]);
+    socket.on('join-denied', () => { alert('Join denied');  location.replace('/'); });
+    socket.on('room-closed', () => { alert('Room closed');  location.replace('/'); });
 
-  /* ---------- mediasoup bootstrap ------------------------------------ */
+    return () => socket.off('join-request')
+                       .off('join-approved')
+                       .off('newProducer')
+                       .off('participant-left')
+                       .off('screen-stopped');
+  }, [isOwner, share]);
+
+  /* ----- mediasoup bootstrap ------------------------------------- */
   async function initMedia() {
-    /* get cam/mic ------------------------------------------------------ */
-    const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
-    localRef.current.srcObject = stream;
+    if (sendT.current) return;                       // already up
 
-    /* router caps ------------------------------------------------------ */
-    const rtpCaps = await new Promise(res =>
-      socket.emit('getRouterRtpCapabilities', res));
+    const cam = await navigator.mediaDevices.getUserMedia({ video:true, audio:true });
+    setLocalStream(cam);
+    localVideoRef.current && (localVideoRef.current.srcObject = cam);
 
-    device.current = new mediasoupClient.Device();
-    await device.current.load({ routerRtpCapabilities: rtpCaps });
+    const caps = await new Promise(r => socket.emit('getRouterRtpCapabilities', r));
+    device.current = new mediasoup.Device();
+    await device.current.load({ routerRtpCapabilities:caps });
 
-    /* send transport --------------------------------------------------- */
-    const paramsSend = await new Promise(res => socket.emit('createTransport', res));
-    sendT.current    = device.current.createSendTransport(paramsSend);
+    /* SEND */
+    const ps = await new Promise(r => socket.emit('createTransport', { consuming:false }, r));
+    sendT.current = device.current.createSendTransport({
+      ...ps, iceServers:ps.iceServers, iceTransportPolicy:'relay'
+    });
 
-    sendT.current.on('connect', (d, cb) =>
-      socket.emit('connectTransport', { transportId: sendT.current.id, dtlsParameters: d }, cb));
+    sendT.current.on('connect', ({ dtlsParameters }, ok, bad) =>
+      socket.emit('connectTransport',
+        { transportId:sendT.current.id, dtlsParameters },
+        a => a?.error ? bad(a.error) : ok()));
 
-    sendT.current.on('produce', (p, cb) =>
-      socket.emit('produce', { transportId: sendT.current.id, ...p }, ({ id }) => cb({ id })));
+    sendT.current.on('produce', ({ kind, rtpParameters, appData }, ok, bad) =>
+      socket.emit('produce',
+        { transportId:sendT.current.id, kind, rtpParameters, appData },
+        ({ id, error }) => error ? bad(error) : ok({ id })));
 
-    await Promise.all(stream.getTracks().map(t => sendT.current.produce({ track: t })));
+    await Promise.all(
+      cam.getTracks().map(async t => {
+        const tag = t.kind === 'video' ? 'cam' : 'mic';
+        const p   = await sendT.current.produce({ track:t, appData:{ mediaTag:tag } });
+        if (tag === 'mic') audioProducer.current = p;
+      })
+    );
 
-    /* recv transport --------------------------------------------------- */
-    const paramsRecv = await new Promise(res => socket.emit('createTransport', res));
-    recvT.current    = device.current.createRecvTransport(paramsRecv);
+    /* RECV */
+    const pr = await new Promise(r => socket.emit('createTransport', { consuming:true }, r));
+    recvT.current = device.current.createRecvTransport({
+      ...pr, iceServers:pr.iceServers, iceTransportPolicy:'relay'
+    });
 
-    recvT.current.on('connect', (d, cb) =>
-      socket.emit('connectTransport', { transportId: recvT.current.id, dtlsParameters: d }, cb));
+    recvT.current.on('connect', ({ dtlsParameters }, ok, bad) =>
+      socket.emit('connectTransport',
+        { transportId:recvT.current.id, dtlsParameters },
+        a => a?.error ? bad(a.error) : ok()));
+
+    while (pending.current.length) consumeProducer(pending.current.shift());
   }
 
-  /* ---------- consume helper ----------------------------------------- */
-  function handleProducer({ producerId, socketId }) {
-    if (consumers.current.has(producerId) || !recvT.current) return;
+  /* ----- consume helpers ----------------------------------------- */
+  function handleProducer(info){
+    if (!recvT.current){ pending.current.push(info); return; }
+    consumeProducer(info);
+  }
+
+  function consumeProducer(info){
+    const { producerId, socketId, mediaTag } = info;
+    if (consumers.current.has(producerId)) return;
     consumers.current.add(producerId);
 
-    socket.emit('consume', { producerId, rtpCapabilities: device.current.rtpCapabilities },
-      async ({ id, kind, rtpParameters }) => {
-        const consumer = await recvT.current.consume({ id, producerId, kind, rtpParameters });
-        setPeople(p => {
-          const stream = p[socketId]?.stream ?? new MediaStream();
-          stream.addTrack(consumer.track);
-          return { ...p, [socketId]: { stream } };
-        });
+    socket.emit('consume',
+      { producerId, rtpCapabilities:device.current.rtpCapabilities },
+      async ({ id, kind, rtpParameters, error }) => {
+        if (error) return console.error(error);
+        const cons = await recvT.current.consume({ id, producerId, kind, rtpParameters });
+        await cons.resume();
+
+        const isScreen = mediaTag === 'screen';
+
+        const clearShare = () =>
+          setShare(s => (s && s.socketId === socketId ? null : s));
+        cons.on('producerclose', clearShare);
+        cons.track.onended = clearShare;
+
+        if (isScreen){
+          setShare({ socketId, stream:new MediaStream([cons.track]) });
+        }else{
+          setPeople(p => {
+            const stream = p[socketId]?.stream ?? new MediaStream();
+            stream.addTrack(cons.track);
+            return { ...p, [socketId]:{ stream } };
+          });
+        }
       });
   }
 
-  /* ---------- render -------------------------------------------------- */
+  /* ----- controls ------------------------------------------------- */
+  const toggleMic = () => {
+    const p = audioProducer.current;
+    if (!p) return;
+    p.paused ? p.resume() : p.pause();
+    setMicOn(!p.paused);
+  };
+
+  const startShare = async () => {
+    if (share && share !== 'pending') return;   // only one at a time
+    try {
+      setShare('pending');                      // UI hint – waiting for OS dialog
+      const disp  = await navigator.mediaDevices.getDisplayMedia({ video:true });
+      const track = disp.getVideoTracks()[0];
+      track.onended = stopShare;
+
+      shareProducer.current = await sendT.current.produce({
+        track, appData:{ mediaTag:'screen' }
+      });
+      setShare({ socketId:'you', stream:new MediaStream([track]) });
+    } catch (e){
+      // User ignored or denied → reset & guide
+      setShare(null);
+      if (e.name === 'NotAllowedError'){
+        alert(
+          "iOS needs two taps to start screen sharing:\n\n" +
+          "1) Tap 'Allow' on the tiny permission banner at the very top.\n" +
+          "2) Tap 'Share screen' again and pick Safari."
+        );
+      } else {
+        console.error(e);
+      }
+    }
+  };
+
+  const stopShare = () => {
+    if (!shareProducer.current) return;
+    shareProducer.current.close();
+    shareProducer.current = null;
+    setShare(null);
+    socket.emit('stop-screen');
+  };
+
+  /* ----- UI ------------------------------------------------------- */
   return (
-    <div style={{ padding: 32 }}>
-      <h2>Room {roomId}</h2>
-      {isOwner   && !approved && <p>Waiting for guests…</p>}
-      {!isOwner  && !approved && <p>Waiting for owner approval…</p>}
+    <div style={styles.wrapper}>
+      <header style={styles.header}>
+        <h3>Room {roomId}</h3>
+        <button onClick={toggleMic}>{micOn ? 'Mute ⏸' : 'Un-mute 🔊'}</button>
 
-      <video ref={localRef}  autoPlay playsInline muted width={320} style={{ background:'#000' }} />
+        {share === 'pending' && (
+          <button disabled>Waiting for permission…</button>
+        )}
 
-      {Object.entries(people).map(([id, { stream }]) =>
-        <video key={id} autoPlay playsInline width={320}
-               ref={el => el && (el.srcObject = stream)} />)}
+        {share && share !== 'pending' ? (
+          share.socketId === 'you'
+            ? <button onClick={stopShare}>Stop share 🛑</button>
+            : <button disabled>Screen in progress…</button>
+        ) : null}
+
+        {!share && share !== 'pending' && (
+          <button onClick={startShare}>Share screen 🖥️</button>
+        )}
+      </header>
+
+      {stageId ? (
+        <Stage
+          peerId={stageId}
+          stream={stageId === 'you' ? localStream : people[stageId]?.stream}
+          onExit={() => setStageId(null)}
+        />
+      ) : (
+        <>
+          {share && share !== 'pending' && (
+            <div style={styles.shareBox}>
+              <video
+                autoPlay playsInline
+                muted={share.socketId === 'you'}
+                ref={el => el && (el.srcObject = share.stream)}
+                style={styles.shareVideo}
+              />
+              <span style={styles.shareLabel}>
+                {share.socketId === 'you' ? 'Your screen'
+                                           : `${share.socketId}'s screen`}
+              </span>
+            </div>
+          )}
+
+          {/* -------- PDF area -------- */}
+          <div {...getRootProps()} style={styles.pdfDrop(isDragActive)}>
+            <input {...getInputProps()} />
+            {isOwner ? 'Drag or click to share PDF' : 'PDF preview'}
+          </div>
+
+          {pdfDoc && (
+            pdfFull ? (
+              <div style={styles.pdfStage}>
+                <Document file={pdfDoc.url}><Page pageNumber={1} width={720}/></Document>
+                <button style={styles.closeBtn} onClick={()=>setPdfFull(false)}>✕</button>
+              </div>
+            ) : (
+              <div style={styles.pdfThumb} onClick={()=>setPdfFull(true)}>
+                <Document file={pdfDoc.url}><Page pageNumber={1} width={120}/></Document>
+                <div style={{fontSize:12,marginTop:4}}>{pdfDoc.name}</div>
+              </div>
+            )
+          )}
+
+          <div style={styles.grid}>
+            <Tile
+              peerId="you"
+              stream={localStream}
+              refEl={localVideoRef}
+              onStage={() => setStageId('you')}
+            />
+            {Object.entries(people).map(([id, { stream }]) => (
+              <Tile key={id}
+                    peerId={id}
+                    stream={stream}
+                    onStage={() => setStageId(id)} />
+            ))}
+          </div>
+          <CodePad roomId={roomId} editable={isOwner /* change as you like */} />
+          <ChatBox roomId={roomId} nick={nick}/>
+        </>
+      )}
+    </div>
+  );
+
+  
+}
+
+/* ──────────────────────────────────────────────────────────────────── */
+/*  Presentational helpers                                             */
+/* ──────────────────────────────────────────────────────────────────── */
+function Tile({ peerId, stream, refEl, onStage }){
+  return (
+    <div style={styles.tile} onClick={onStage}>
+      <video
+        ref={el => {
+          if (refEl) refEl.current = el;
+          el && stream && (el.srcObject = stream);
+        }}
+        autoPlay playsInline muted={peerId === 'you'}
+        style={styles.vid}
+      />
+      <span style={styles.label}>{peerId === 'you' ? 'You' : peerId}</span>
+      <button style={styles.fullBtn}>⤢</button>
     </div>
   );
 }
+
+function Stage({ peerId, stream, onExit }){
+  return (
+    <div style={styles.stage}>
+      <video
+        autoPlay playsInline muted={peerId === 'you'}
+        ref={el => el && (el.srcObject = stream)}
+        style={styles.stageVideo}
+      />
+      <button style={styles.closeBtn} onClick={onExit}>✕</button>
+    </div>
+  );
+}
+
+/* ---------- inline styles (same as before) ------------------------ */
+const styles = {
+  wrapper : { padding:16,height:'100vh',display:'flex',flexDirection:'column',
+              boxSizing:'border-box',fontFamily:'sans-serif' },
+  header  : { display:'flex',gap:12,alignItems:'center',marginBottom:8 },
+  grid    : { display:'grid',gap:8,
+              gridTemplateColumns:`repeat(auto-fill,minmax(${TILE_W}px,1fr))`,
+              flex:1,overflow:'auto' },
+
+  tile    : { position:'relative',width:'100%',paddingTop:'56.25%',
+              background:'#000',borderRadius:8,overflow:'hidden',cursor:'pointer' },
+  vid     : { position:'absolute',top:0,left:0,width:'100%',height:'100%',
+              objectFit:'cover' },
+  label   : { position:'absolute',bottom:4,left:6,fontSize:12,
+              color:'#fff',background:'#0008',padding:'2px 6px',borderRadius:4 },
+  fullBtn : { position:'absolute',top:4,right:4,zIndex:2,
+              background:'#0006',color:'#fff',border:'none',
+              borderRadius:4,padding:'0 6px' },
+
+  stage   : { position:'relative',flex:1,background:'#000',
+              borderRadius:8,overflow:'hidden' },
+  stageVideo:{ width:'100%',height:'100%',objectFit:'contain' },
+  closeBtn:{ position:'absolute',top:10,right:10,fontSize:24,
+             background:'none',border:'none',color:'#fff',cursor:'pointer' },
+
+  shareBox : { position:'relative',width:'100%',paddingTop:'38%',marginBottom:8,
+               background:'#000',borderRadius:8,overflow:'hidden' },
+  shareVideo:{ position:'absolute',top:0,left:0,width:'100%',height:'100%',
+               objectFit:'contain' },
+  shareLabel:{ position:'absolute',bottom:4,left:6,fontSize:12,
+               color:'#fff',background:'#0008',padding:'2px 6px',borderRadius:4 },
+  codeBox : { height:'200px', marginTop:8, borderRadius:8,
+              overflow:'hidden', background:'#1e1e1e' },
+
+  pdfDrop : active=>({
+    marginTop:8,padding:12,border:'2px dashed #888',borderRadius:8,
+    textAlign:'center',background:active?'#444':'#222',color:'#ccc',
+    cursor:'pointer'
+  }),
+  pdfThumb:{ marginTop:8,cursor:'pointer',textAlign:'center',
+             background:'#000',padding:8,borderRadius:4 },
+  pdfStage:{ position:'relative',width:'100%',paddingTop:'56.25%',
+             background:'#000',borderRadius:8,overflow:'hidden',
+             display:'flex',justifyContent:'center',alignItems:'center' },
+
+  /* chat */
+  chatWrap:{ position:'fixed',right:8,top:60,bottom:8,width:260,
+             display:'flex',flexDirection:'column',
+             background:'#111d',backdropFilter:'blur(4px)',
+             borderRadius:8,padding:8,fontSize:14,color:'#fff' },
+  chatLog :{ flex:1,overflowY:'auto',marginBottom:4 },
+  chatInput:{ width:'80%',marginRight:4 }
+
+};
