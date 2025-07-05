@@ -2,11 +2,56 @@ import { useEffect, useState, useRef, useCallback } from 'react';
 import { useParams } from 'react-router-dom';
 import io from 'socket.io-client';
 import * as mediasoup from 'mediasoup-client';
+
 import CodeMirror from '@uiw/react-codemirror';
 import { javascript } from '@codemirror/lang-javascript';
+import { useDropzone }                 from 'react-dropzone';
+import { pdfjs, Document, Page }       from 'react-pdf';
+import 'react-pdf/dist/Page/TextLayer.css';
+import 'react-pdf/dist/Page/AnnotationLayer.css';
+pdfjs.GlobalWorkerOptions.workerSrc =
+  `//cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjs.version}/pdf.worker.min.js`;
 
 const socket  = io('https://webrtcserver.mmup.org', { transports:['websocket'] });
 const TILE_W  = 320;
+
+/* ---------- tiny chat bubble ------------------------------------ */
+function ChatBox({ roomId, nick }){
+  const [messages,setMsgs] = useState([]);
+  const [text,setText]     = useState('');
+
+  useEffect(()=>{
+    const h = m => setMsgs(v => [...v, m]);
+    socket.on('chat-recv', h);
+    return ()=>socket.off('chat-recv', h);
+  },[]);
+
+  const send = () => {
+    if(!text.trim()) return;
+    socket.emit('chat-send', { roomId, text, from:nick });
+    setMsgs(v => [...v, { text, from:'me' }]);
+    setText('');
+  };
+
+  return (
+    <div style={styles.chatWrap}>
+      <div style={styles.chatLog}>
+        {messages.map((m,i)=>(
+          <div key={i} style={{margin:'4px 0'}}>
+            <b>{m.from==='me'?nick:m.from}:</b> {m.text}
+          </div>
+        ))}
+      </div>
+      <div>
+        <input style={styles.chatInput}
+               value={text} onChange={e=>setText(e.target.value)}
+               onKeyDown={e=>e.key==='Enter'&&send()} />
+        <button onClick={send}>➤</button>
+      </div>
+    </div>
+  );
+}
+
 
 function CodePad({ roomId, editable }) {
   const [code, setCode] = useState('');
@@ -51,6 +96,7 @@ function CodePad({ roomId, editable }) {
 /* ──────────────────────────────────────────────────────────────────── */
 export default function Room() {
   const { roomId } = useParams();
+  const nick       = 'Nick';
 
   /* ----- refs + state -------------------------------------------- */
   const localVideoRef = useRef(null);
@@ -71,6 +117,28 @@ export default function Room() {
   const [approved, setApproved] = useState(false);
   const [micOn,    setMicOn]    = useState(true);
   const [stageId,  setStageId]  = useState(null);
+
+  const [pdfDoc,setPdf]=useState(null);      // {url,name}
+  const [pdfFull,setPdfFull]=useState(false);
+
+  /* owner-only dropzone */
+  const onDrop = useCallback(async files=>{
+    const fd = new FormData();
+    fd.append('file', files[0]);
+    const res = await fetch('/upload/pdf',{method:'POST',body:fd});
+    const {url,name} = await res.json();
+    socket.emit('pdf-share', { roomId, url, name });
+    setPdf({url,name});
+    setPdfFull(false);
+  },[roomId]);
+
+  const {getRootProps,getInputProps,isDragActive} =
+    useDropzone({ onDrop, accept:{'application/pdf':[]}, maxFiles:1, disabled:!isOwner });
+
+  useEffect(()=>{
+    socket.on('pdf-recv', ({url,name})=>{ setPdf({url,name}); setPdfFull(false);} );
+    return ()=>socket.off('pdf-recv');
+  },[]);
 
   /* ----- join ----------------------------------------------------- */
   useEffect(() => {
@@ -290,6 +358,26 @@ export default function Room() {
             </div>
           )}
 
+          {/* -------- PDF area -------- */}
+          <div {...getRootProps()} style={styles.pdfDrop(isDragActive)}>
+            <input {...getInputProps()} />
+            {isOwner ? 'Drag or click to share PDF' : 'PDF preview'}
+          </div>
+
+          {pdfDoc && (
+            pdfFull ? (
+              <div style={styles.pdfStage}>
+                <Document file={pdfDoc.url}><Page pageNumber={1} width={720}/></Document>
+                <button style={styles.closeBtn} onClick={()=>setPdfFull(false)}>✕</button>
+              </div>
+            ) : (
+              <div style={styles.pdfThumb} onClick={()=>setPdfFull(true)}>
+                <Document file={pdfDoc.url}><Page pageNumber={1} width={120}/></Document>
+                <div style={{fontSize:12,marginTop:4}}>{pdfDoc.name}</div>
+              </div>
+            )
+          )}
+
           <div style={styles.grid}>
             <Tile
               peerId="you"
@@ -305,10 +393,13 @@ export default function Room() {
             ))}
           </div>
           <CodePad roomId={roomId} editable={isOwner /* change as you like */} />
+          <ChatBox roomId={roomId} nick={nick}/>
         </>
       )}
     </div>
   );
+
+  
 }
 
 /* ──────────────────────────────────────────────────────────────────── */
@@ -376,5 +467,25 @@ const styles = {
   shareLabel:{ position:'absolute',bottom:4,left:6,fontSize:12,
                color:'#fff',background:'#0008',padding:'2px 6px',borderRadius:4 },
   codeBox : { height:'200px', marginTop:8, borderRadius:8,
-              overflow:'hidden', background:'#1e1e1e' }
+              overflow:'hidden', background:'#1e1e1e' },
+
+  pdfDrop : active=>({
+    marginTop:8,padding:12,border:'2px dashed #888',borderRadius:8,
+    textAlign:'center',background:active?'#444':'#222',color:'#ccc',
+    cursor:'pointer'
+  }),
+  pdfThumb:{ marginTop:8,cursor:'pointer',textAlign:'center',
+             background:'#000',padding:8,borderRadius:4 },
+  pdfStage:{ position:'relative',width:'100%',paddingTop:'56.25%',
+             background:'#000',borderRadius:8,overflow:'hidden',
+             display:'flex',justifyContent:'center',alignItems:'center' },
+
+  /* chat */
+  chatWrap:{ position:'fixed',right:8,top:60,bottom:8,width:260,
+             display:'flex',flexDirection:'column',
+             background:'#111d',backdropFilter:'blur(4px)',
+             borderRadius:8,padding:8,fontSize:14,color:'#fff' },
+  chatLog :{ flex:1,overflowY:'auto',marginBottom:4 },
+  chatInput:{ width:'80%',marginRight:4 }
+
 };
