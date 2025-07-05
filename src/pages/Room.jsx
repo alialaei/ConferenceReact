@@ -4,7 +4,6 @@ import io from 'socket.io-client';
 import * as mediasoup from 'mediasoup-client';
 import CodeMirror from '@uiw/react-codemirror';
 import '@uiw/react-codemirror/dist/codemirror.css';
-import CodeMirror from '@uiw/react-codemirror';
 import { javascript } from '@codemirror/lang-javascript';
 
 const socket  = io('https://webrtcserver.mmup.org', { transports:['websocket'] });
