@@ -12,8 +12,11 @@
     "@codemirror/lang-javascript": "^6.2.4",
     "@uiw/react-codemirror": "^4.24.0",
     "mediasoup-client": "^3.12.2",
+    "pdfjs-dist": "^5.3.31",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
+    "react-dropzone": "^14.3.8",
+    "react-pdf": "^10.0.1",
     "react-router-dom": "^7.6.3",
     "socket.io-client": "^4.8.1"
   },
