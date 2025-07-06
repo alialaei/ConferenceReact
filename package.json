@@ -9,10 +9,11 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "@tailwindcss/vite": "^4.1.11",
-    "mediasoup-client": "^3.12.2",
     "@codemirror/lang-javascript": "^6.2.4",
+    "@tailwindcss/vite": "^4.1.11",
+    "@uiw/codemirror-theme-okaidia": "^4.24.0",
     "@uiw/react-codemirror": "^4.24.0",
+    "lucide-react": "^0.525.0",
     "mediasoup-client": "^3.12.2",
     "pdfjs-dist": "^5.3.31",
     "react": "^19.0.0",

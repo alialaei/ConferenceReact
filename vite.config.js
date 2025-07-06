@@ -7,6 +7,6 @@ export default defineConfig({
   server: {
     port: 3001,
     host: true, // enable external access
-    allowedHosts: ["conference.mmup.org"], // explicitly allow your domain
+    allowedHosts: ["conference.mmup.org","4f59-45-93-169-195.ngrok-free.app"], // explicitly allow your domain
   },
 });
