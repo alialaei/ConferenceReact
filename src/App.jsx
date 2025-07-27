@@ -16,17 +16,20 @@ const App = () => {
       <Routes>
         {/* --- Original Routes (Untouched) --- */}
         {/* This route redirects the homepage to a new random room with the OLD design */}
-        <Route
+        {/* <Route
           path="/"
           element={<Navigate to={`/room/${generateShortId()}`} />}
-        />
+        /> */}
+        <Route
+          path="/"
+          element={<TestPage />} />
 
         {/* This route handles the OLD room component */}
         <Route path="/room/:roomId" element={<Room />} />
 
         {/* --- New Test Routes for the Redesigned UI --- */}
         {/* This route shows the LOBBY for the new design */}
-        <Route path="/" element={<TestPage />} />
+        {/* <Route path="/test" element={<TestPage />} /> */}
 
         {/* This route enters a specific room with the NEW design */}
         <Route path="/test/:roomId" element={<TestPage />} />
