@@ -276,7 +276,8 @@ function CodeEditor({ roomId, editable }) {
         setPyodide(py);
         setPyLoading(false);
       } catch (err) {
-        setOutput("Failed to load Python runtime");
+        console.error(err);
+        setOutput("Failed to load Python runtime"); // only if actually failed
       }
     }
     initPyodide();
@@ -350,7 +351,9 @@ function CodeEditor({ roomId, editable }) {
         </select>
         <button
           onClick={runCode}
-          disabled={language === "python" && pyLoading}
+          disabled={language === "python" && pyLoading && (
+                      <span className="text-gray-400 text-xs ml-2">Loading Python...</span>
+                    )}
           className={`flex items-center gap-1 px-3 py-1 rounded text-sm ${
             language === "python" && pyLoading
               ? "bg-gray-600 cursor-not-allowed"
