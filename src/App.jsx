@@ -26,7 +26,7 @@ const App = () => {
 
         {/* --- New Test Routes for the Redesigned UI --- */}
         {/* This route shows the LOBBY for the new design */}
-        <Route path="/test" element={<TestPage />} />
+        <Route path="/" element={<TestPage />} />
 
         {/* This route enters a specific room with the NEW design */}
         <Route path="/test/:roomId" element={<TestPage />} />

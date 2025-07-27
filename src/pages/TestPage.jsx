@@ -2,6 +2,8 @@ import * as mediasoup from "mediasoup-client";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useLocation, useNavigate, useParams } from "react-router-dom";
 import io from "socket.io-client";
+import { python } from "@codemirror/lang-python";
+import { Play as PlayIcon, Code as CodeIcon } from "lucide-react";
 
 import { javascript } from "@codemirror/lang-javascript";
 import { okaidia } from "@uiw/codemirror-theme-okaidia";
@@ -135,6 +137,7 @@ function ControlBar({
   onShare,
   onLeave,
   isSharing,
+  toggleCode,
 }) {
   return (
     <div className="fixed bottom-4 left-1/2 -translate-x-1/2 flex items-center gap-2 md:gap-4 bg-gray-800/80 backdrop-blur-sm p-2 md:p-3 rounded-full shadow-lg z-50">
@@ -170,6 +173,12 @@ function ControlBar({
         className="p-3 rounded-full bg-red-600 hover:bg-red-700 transition-colors"
       >
         <PhoneOff size={20} />
+      </button>
+      <button
+        onClick={toggleCode}
+        className="p-3 rounded-full bg-purple-600 hover:bg-purple-700 transition-colors md:hidden"
+      >
+        <CodeIcon size={20} />
       </button>
     </div>
   );
@@ -254,6 +263,8 @@ function Chat({ roomId, nick, isChatEnabled, isOpen, onClose }) {
 
 function CodeEditor({ roomId, editable }) {
   const [code, setCode] = useState("// Loading code...");
+  const [language, setLanguage] = useState("javascript");
+  const [output, setOutput] = useState("");
 
   useEffect(() => {
     socket.emit("code-get", { roomId }, (text) =>
@@ -275,19 +286,60 @@ function CodeEditor({ roomId, editable }) {
     [roomId]
   );
 
+  const runCode = () => {
+    if (language === "javascript") {
+      try {
+        const result = eval(code);
+        setOutput(String(result));
+      } catch (e) {
+        setOutput("Error: " + e.message);
+      }
+    } else if (language === "python") {
+      setOutput("Python execution not implemented yet.");
+    } 
+    // else if (language === "php") {
+    //   setOutput("PHP execution not implemented yet.");
+    // }
+  };
+
   return (
-    <div className="h-full w-full rounded-lg overflow-hidden bg-[#272822]">
+    <div className="h-full w-full rounded-lg overflow-hidden bg-[#272822] flex flex-col">
+      <div className="flex items-center gap-2 p-2 bg-gray-800">
+        <select
+          value={language}
+          onChange={(e) => setLanguage(e.target.value)}
+          className="p-1 rounded bg-gray-700"
+        >
+          <option value="javascript">JavaScript</option>
+          <option value="python">Python</option>
+          {/* <option value="php">PHP</option> */}
+        </select>
+        <button
+          onClick={runCode}
+          className="flex items-center gap-1 bg-green-600 hover:bg-green-700 px-3 py-1 rounded text-sm"
+        >
+          <PlayIcon size={16} /> Run
+        </button>
+      </div>
       <CodeMirror
         value={code}
         height="100%"
         theme={okaidia}
-        extensions={[javascript()]}
+        extensions={[
+          language === "python"
+            ? python()
+            : javascript() // fallback for JS and PHP
+        ]}
         readOnly={!editable}
         onChange={editable ? onChange : undefined}
       />
+      <div className="p-2 text-xs bg-gray-900 text-white min-h-[40px]">
+        {output}
+      </div>
     </div>
   );
 }
+
 
 function HomePageLobby({ onCreate, onJoin }) {
   const [joinCode, setJoinCode] = useState("");
@@ -426,6 +478,8 @@ export default function TestPage() {
   const [isChatOpen, setChatOpen] = useState(false);
 
   const nick = location.state?.nick || "Guest";
+
+  const [isCodeOpen, setIsCodeOpen] = useState(false);
 
   const handleCreateMeeting = ({ nick, roomId }) => {
     navigate(`/test/${roomId}`, { state: { nick } });
@@ -794,6 +848,11 @@ export default function TestPage() {
           <div className="h-1/3 hidden md:block">
             <CodeEditor roomId={roomId} editable={isOwnerRef.current} />
           </div>
+          {isCodeOpen && (
+            <div className="h-1/3 md:hidden">
+              <CodeEditor roomId={roomId} editable={isOwnerRef.current} />
+            </div>
+          )}
         </main>
         <aside
           className={`fixed top-0 bottom-0 h-full transition-transform duration-300 ease-in-out z-[60] w-full max-w-sm md:w-80 md:relative md:translate-x-0 ${
@@ -854,6 +913,7 @@ export default function TestPage() {
         onShare={share ? stopShare : startShare}
         onLeave={leaveRoom}
         isSharing={!!share}
+        toggleCode={() => setIsCodeOpen((v) => !v)}
       />
     </div>
   );
