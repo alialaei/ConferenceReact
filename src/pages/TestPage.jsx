@@ -3,6 +3,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useLocation, useNavigate, useParams } from "react-router-dom";
 import io from "socket.io-client";
 import { python } from "@codemirror/lang-python";
+import { loadPyodide } from "pyodide";
 import { Play as PlayIcon, Code as CodeIcon } from "lucide-react";
 
 import { javascript } from "@codemirror/lang-javascript";
@@ -265,6 +266,15 @@ function CodeEditor({ roomId, editable }) {
   const [code, setCode] = useState("// Loading code...");
   const [language, setLanguage] = useState("javascript");
   const [output, setOutput] = useState("");
+  const [pyodide, setPyodide] = useState(null);
+
+  useEffect(() => {
+    async function initPyodide() {
+      const py = await loadPyodide();
+      setPyodide(py);
+    }
+    initPyodide();
+  }, []);
 
   useEffect(() => {
     socket.emit("code-get", { roomId }, (text) =>
@@ -286,17 +296,35 @@ function CodeEditor({ roomId, editable }) {
     [roomId]
   );
 
-  const runCode = () => {
+  const runCode = async () => {
     if (language === "javascript") {
       try {
+        let logs = [];
+        const originalLog = console.log;
+        console.log = (...args) => {
+          logs.push(args.join(" "));
+          originalLog(...args);
+        };
+
         const result = eval(code);
-        setOutput(String(result));
+        console.log = originalLog;
+
+        setOutput(logs.length ? logs.join("\n") : String(result));
       } catch (e) {
         setOutput("Error: " + e.message);
       }
     } else if (language === "python") {
-      setOutput("Python execution not implemented yet.");
-    } 
+      if (!pyodide) {
+        setOutput("Python is still loading...");
+        return;
+      }
+      try {
+        const result = await pyodide.runPythonAsync(code);
+        setOutput(String(result));
+      } catch (e) {
+        setOutput("Error: " + e.message);
+      }
+    }
     // else if (language === "php") {
     //   setOutput("PHP execution not implemented yet.");
     // }
