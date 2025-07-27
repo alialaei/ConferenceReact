@@ -267,11 +267,17 @@ function CodeEditor({ roomId, editable }) {
   const [language, setLanguage] = useState("javascript");
   const [output, setOutput] = useState("");
   const [pyodide, setPyodide] = useState(null);
+  const [pyLoading, setPyLoading] = useState(true);
 
   useEffect(() => {
     async function initPyodide() {
-      const py = await loadPyodide();
-      setPyodide(py);
+      try {
+        const py = await loadPyodide();
+        setPyodide(py);
+        setPyLoading(false);
+      } catch (err) {
+        setOutput("Failed to load Python runtime");
+      }
     }
     initPyodide();
   }, []);
@@ -314,7 +320,7 @@ function CodeEditor({ roomId, editable }) {
         setOutput("Error: " + e.message);
       }
     } else if (language === "python") {
-      if (!pyodide) {
+      if (pyLoading || !pyodide) {
         setOutput("Python is still loading...");
         return;
       }
@@ -344,7 +350,12 @@ function CodeEditor({ roomId, editable }) {
         </select>
         <button
           onClick={runCode}
-          className="flex items-center gap-1 bg-green-600 hover:bg-green-700 px-3 py-1 rounded text-sm"
+          disabled={language === "python" && pyLoading}
+          className={`flex items-center gap-1 px-3 py-1 rounded text-sm ${
+            language === "python" && pyLoading
+              ? "bg-gray-600 cursor-not-allowed"
+              : "bg-green-600 hover:bg-green-700"
+          }`}
         >
           <PlayIcon size={16} /> Run
         </button>
